@@ -1,14 +1,16 @@
+```json
 {
   "name": "clipper-backend",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {"start": "node src/server.js"},
-  "engines": {"node": ">=20"},
+  "version": "1.2.0",
+  "description": "Clipper backend for Instagram Reel inspiration, AI vision analysis and rendering",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "tesseract.js": "^6.0.1"
+    "express": "^4.21.2"
   }
 }
+```
