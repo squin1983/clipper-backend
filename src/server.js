@@ -1,100 +1,217 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const fs = require('fs/promises');
+const path = require('path');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 
 dotenv.config();
 
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..');
+const app = express();
+const PORT = process.env.PORT || 10000;
 
-const DATA = path.join(ROOT, 'data');
-const DB_FILE = path.join(DATA, 'db.json');
-const RAW = path.join(DATA, 'raw');
-const RENDERED = path.join(DATA, 'rendered');
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 
-const PORT = Number(process.env.PORT || 10000);
+const ROOT = '/tmp/clipper';
+const RAW = path.join(ROOT, 'raw');
+const OUTPUT = path.join(ROOT, 'output');
+const DB_FILE = path.join(ROOT, 'db.json');
 
-await fs.mkdir(RAW, { recursive: true });
-await fs.mkdir(RENDERED, { recursive: true });
+async function ensureStorage() {
+  await fs.mkdir(RAW, { recursive: true });
+  await fs.mkdir(OUTPUT, { recursive: true });
 
-async function loadDb() {
   try {
-    return JSON.parse(await fs.readFile(DB_FILE, 'utf8'));
+    await fs.access(DB_FILE);
   } catch {
-    return {
-      accounts: [],
-      reels: [],
-      batches: [],
-      jobs: []
-    };
+    await fs.writeFile(
+      DB_FILE,
+      JSON.stringify(
+        {
+          accounts: [],
+          reels: [],
+          batches: [],
+          jobs: []
+        },
+        null,
+        2
+      )
+    );
   }
 }
 
-async function saveDb(db) {
+async function readDb() {
+  await ensureStorage();
+  const raw = await fs.readFile(DB_FILE, 'utf8');
+  return JSON.parse(raw);
+}
+
+async function writeDb(db) {
+  await ensureStorage();
   await fs.writeFile(
     DB_FILE,
     JSON.stringify(db, null, 2)
   );
 }
 
-function id(prefix = 'id') {
-  return `${prefix}_${crypto.randomUUID()}`;
-}
-
-function cleanUsername(value) {
+function normalizeUsername(value) {
   return String(value || '')
     .trim()
     .replace(/^@/, '')
-    .toLowerCase();
+    .replace(/\/+$/, '');
 }
 
-function shuffle(array) {
-  const x = [...array];
+function pickVideoUrl(item) {
+  return (
+    item.videoUrl ||
+    item.video_url ||
+    item.video ||
+    item.displayUrl ||
+    item.url ||
+    null
+  );
+}
 
-  for (let i = x.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [x[i], x[j]] = [x[j], x[i]];
+function pickPreviewUrl(item) {
+  return (
+    item.displayUrl ||
+    item.thumbnailUrl ||
+    item.thumbnail ||
+    item.imageUrl ||
+    null
+  );
+}
+
+function pickCaption(item) {
+  return (
+    item.caption ||
+    item.text ||
+    item.description ||
+    ''
+  );
+}
+
+function pickPermalink(item) {
+  if (item.permalink) {
+    return item.permalink;
   }
 
-  return x;
+  if (item.shortCode) {
+    return `https://www.instagram.com/reel/${item.shortCode}/`;
+  }
+
+  if (item.url && String(item.url).includes('instagram.com')) {
+    return item.url;
+  }
+
+  return null;
 }
 
-const app = express();
+function findReel(db, id) {
+  return db.reels.find(r => r.id === id);
+}
 
-app.use(
-  express.json({
-    limit: '2mb'
-  })
-);
+async function runApify(username) {
+  const token = process.env.APIFY_TOKEN;
 
-app.use(
-  cors({
-    origin: process.env.ALLOWED_ORIGIN || true
-  })
-);
+  if (!token) {
+    throw new Error('APIFY_TOKEN is not configured.');
+  }
 
-app.use(
-  '/media',
-  express.static(RENDERED)
-);
+  const actorId =
+    'instagram-scraper~instagram-profile-reels-scraper';
 
+  const runUrl =
+    `https://api.apify.com/v2/acts/${actorId}/runs?token=${encodeURIComponent(token)}`;
 
-/* =========================
-   HEALTH
-========================= */
+  const response = await fetch(runUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      username,
+      resultsLimit: 50
+    })
+  });
 
-app.get('/api/health', (_req, res) => {
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(
+      `Apify start failed: ${response.status} ${body}`
+    );
+  }
+
+  const run = await response.json();
+
+  const runId = run.data?.id;
+  const datasetId = run.data?.defaultDatasetId;
+
+  if (!runId || !datasetId) {
+    throw new Error('Apify did not return a valid run.');
+  }
+
+  let status = 'RUNNING';
+
+  for (let i = 0; i < 60; i++) {
+    await new Promise(resolve =>
+      setTimeout(resolve, 3000)
+    );
+
+    const statusResponse = await fetch(
+      `https://api.apify.com/v2/actor-runs/${runId}?token=${encodeURIComponent(token)}`
+    );
+
+    if (!statusResponse.ok) {
+      const body = await statusResponse.text();
+      throw new Error(
+        `Apify status failed: ${statusResponse.status} ${body}`
+      );
+    }
+
+    const statusData = await statusResponse.json();
+    status = statusData.data?.status;
+
+    if (
+      status === 'SUCCEEDED' ||
+      status === 'FAILED' ||
+      status === 'ABORTED' ||
+      status === 'TIMED-OUT'
+    ) {
+      break;
+    }
+  }
+
+  if (status !== 'SUCCEEDED') {
+    throw new Error(
+      `Apify run finished with status: ${status}`
+    );
+  }
+
+  const datasetResponse = await fetch(
+    `https://api.apify.com/v2/datasets/${datasetId}/items?token=${encodeURIComponent(token)}`
+  );
+
+  if (!datasetResponse.ok) {
+    const body = await datasetResponse.text();
+    throw new Error(
+      `Apify dataset failed: ${datasetResponse.status} ${body}`
+    );
+  }
+
+  return await datasetResponse.json();
+}
+
+app.get('/api/health', async (req, res) => {
   res.json({
     ok: true,
-    version: '1.1'
+    version: '1.2',
+    service: 'clipper-backend'
   });
 });
 
@@ -103,250 +220,210 @@ app.get('/api/health', (_req, res) => {
    ACCOUNTS
 ========================= */
 
-app.get('/api/accounts', async (_req, res) => {
-  const db = await loadDb();
-  res.json(db.accounts);
-});
-
-
-app.post('/api/accounts', async (req, res) => {
-  const username = cleanUsername(req.body.username);
-  const category = req.body.category;
-
-  if (
-    !username ||
-    !['meme', 'movie_tv', 'music'].includes(category)
-  ) {
-    return res.status(400).json({
-      error: 'username and valid category are required'
+app.get('/api/accounts', async (req, res) => {
+  try {
+    const db = await readDb();
+    res.json(db.accounts);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
     });
   }
+});
 
-  const db = await loadDb();
+app.post('/api/accounts', async (req, res) => {
+  try {
+    const db = await readDb();
 
-  let account = db.accounts.find(
-    x => x.username === username
-  );
+    const username = normalizeUsername(
+      req.body.username
+    );
 
-  if (account) {
-    account.category = category;
-    account.active = true;
+    if (!username) {
+      return res.status(400).json({
+        error: 'Username is required.'
+      });
+    }
 
-    await saveDb(db);
+    const existing = db.accounts.find(
+      account =>
+        account.username.toLowerCase() ===
+        username.toLowerCase()
+    );
 
-    return res.json(account);
+    if (existing) {
+      return res.json(existing);
+    }
+
+    const account = {
+      id: crypto.randomUUID(),
+      username,
+      category: req.body.category || 'meme',
+      createdAt: new Date().toISOString()
+    };
+
+    db.accounts.push(account);
+
+    await writeDb(db);
+
+    res.json(account);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
   }
+});
 
-  account = {
-    id: id('acct'),
-    username,
-    category,
-    active: true,
-    createdAt: new Date().toISOString(),
-    lastSyncAt: null
-  };
+app.delete('/api/accounts/:id', async (req, res) => {
+  try {
+    const db = await readDb();
 
-  db.accounts.push(account);
+    db.accounts = db.accounts.filter(
+      account => account.id !== req.params.id
+    );
 
-  await saveDb(db);
+    db.reels = db.reels.filter(
+      reel => reel.accountId !== req.params.id
+    );
 
-  res.json(account);
+    await writeDb(db);
+
+    res.json({
+      ok: true
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
+  }
 });
 
 
 /* =========================
-   APIFY
+   INSTAGRAM SYNC
 ========================= */
 
-async function apifyActor(input) {
-  if (!process.env.APIFY_TOKEN) {
-    throw new Error(
-      'APIFY_TOKEN is not configured on the server'
-    );
-  }
-
-  const actor =
-    'instagram-scraper~instagram-profile-reels-scraper';
-
-  const url =
-    `https://api.apify.com/v2/acts/${actor}/runs` +
-    `?token=${encodeURIComponent(process.env.APIFY_TOKEN)}` +
-    `&waitForFinish=120`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify(input)
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Apify start failed: ${response.status}`
-    );
-  }
-
-  const run = await response.json();
-
-  const datasetId =
-    run?.data?.defaultDatasetId;
-
-  if (!datasetId) {
-    throw new Error(
-      'Apify did not return a dataset'
-    );
-  }
-
-  const datasetResponse = await fetch(
-    `https://api.apify.com/v2/datasets/${datasetId}/items` +
-    `?token=${encodeURIComponent(process.env.APIFY_TOKEN)}` +
-    `&clean=true`
-  );
-
-  if (!datasetResponse.ok) {
-    throw new Error(
-      `Apify dataset failed: ${datasetResponse.status}`
-    );
-  }
-
-  return await datasetResponse.json();
-}
-
-
-/* =========================
-   SYNC INSTAGRAM
-========================= */
-
-app.post(
-  '/api/accounts/:id/sync',
-  async (req, res) => {
-
-    const db = await loadDb();
+app.post('/api/accounts/:id/sync', async (req, res) => {
+  try {
+    const db = await readDb();
 
     const account = db.accounts.find(
-      x => x.id === req.params.id
+      item => item.id === req.params.id
     );
 
     if (!account) {
       return res.status(404).json({
-        error: 'account not found'
+        error: 'Account not found.'
       });
     }
 
-    try {
+    const items = await runApify(
+      account.username
+    );
 
-      const items = await apifyActor({
-        instagramUsernames: [
-          account.username
-        ],
-        resultsLimit: 100
-      });
+    let added = 0;
+    let updated = 0;
 
-      let added = 0;
+    for (const item of items) {
+      const shortCode =
+        item.shortCode ||
+        item.shortcode ||
+        null;
 
-      for (const item of items) {
+      const permalink =
+        pickPermalink(item);
 
-        const reelId = String(
-          item.id ||
-          item.shortCode ||
-          item.url ||
-          item.pk ||
-          ''
+      const videoUrl =
+        pickVideoUrl(item);
+
+      const previewUrl =
+        pickPreviewUrl(item);
+
+      const caption =
+        pickCaption(item);
+
+      let existing = null;
+
+      if (shortCode) {
+        existing = db.reels.find(
+          reel =>
+            reel.shortCode === shortCode
         );
-
-        if (!reelId) continue;
-
-        const videoUrl =
-          item.videoUrl ||
-          item.video_url ||
-          item.mediaUrl ||
-          item.media_url ||
-          item.downloadUrl ||
-          item.download_url ||
-          '';
-
-        if (!videoUrl) continue;
-
-        const previewUrl =
-          item.thumbnailUrl ||
-          item.thumbnail_url ||
-          item.displayUrl ||
-          item.display_url ||
-          item.imageUrl ||
-          item.image_url ||
-          '';
-
-        const permalink =
-          item.url ||
-          item.permalink ||
-          item.reelUrl ||
-          item.reel_url ||
-          '';
-
-        const existing = db.reels.find(
-          r => r.id === reelId
-        );
-
-        if (existing) {
-          existing.videoUrl = videoUrl;
-
-          if (previewUrl) {
-            existing.previewUrl = previewUrl;
-          }
-
-          if (permalink) {
-            existing.permalink = permalink;
-          }
-
-          continue;
-        }
-
-        db.reels.push({
-          id: reelId,
-          sourceId: account.id,
-          username: account.username,
-          category: account.category,
-          permalink,
-          videoUrl,
-          previewUrl,
-          caption: item.caption || '',
-          used: false,
-          reserved: false,
-          createdAt:
-            item.timestamp ||
-            new Date().toISOString()
-        });
-
-        added++;
       }
 
-      account.lastSyncAt =
-        new Date().toISOString();
-
-      await saveDb(db);
-
-      const accountReels =
-        db.reels.filter(
-          r => r.sourceId === account.id
+      if (!existing && permalink) {
+        existing = db.reels.find(
+          reel =>
+            reel.permalink === permalink
         );
+      }
 
-      res.json({
-        account,
-        added,
-        total: accountReels.length,
-        reels: accountReels
+      if (existing) {
+        existing.videoUrl =
+          videoUrl || existing.videoUrl;
+
+        existing.previewUrl =
+          previewUrl || existing.previewUrl;
+
+        existing.caption =
+          caption || existing.caption;
+
+        existing.permalink =
+          permalink || existing.permalink;
+
+        existing.updatedAt =
+          new Date().toISOString();
+
+        updated++;
+        continue;
+      }
+
+      db.reels.push({
+        id: crypto.randomUUID(),
+        accountId: account.id,
+        username: account.username,
+        shortCode,
+        permalink,
+        videoUrl,
+        previewUrl,
+        caption,
+        used: false,
+        createdAt:
+          item.timestamp ||
+          item.takenAt ||
+          new Date().toISOString(),
+        updatedAt:
+          new Date().toISOString()
       });
 
-    } catch (error) {
-
-      res.status(502).json({
-        error: error.message
-      });
-
+      added++;
     }
+
+    account.lastSync =
+      new Date().toISOString();
+
+    account.reelCount =
+      db.reels.filter(
+        reel =>
+          reel.accountId === account.id
+      ).length;
+
+    await writeDb(db);
+
+    res.json({
+      ok: true,
+      added,
+      updated,
+      total: account.reelCount
+    });
+  } catch (error) {
+    console.error(error);
+
+    res.status(500).json({
+      error: error.message
+    });
   }
-);
+});
 
 
 /* =========================
@@ -354,24 +431,53 @@ app.post(
 ========================= */
 
 app.get('/api/reels', async (req, res) => {
+  try {
+    const db = await readDb();
 
-  const db = await loadDb();
+    let reels = db.reels;
 
-  let reels = db.reels;
+    if (req.query.accountId) {
+      reels = reels.filter(
+        reel =>
+          reel.accountId ===
+          req.query.accountId
+      );
+    }
 
-  if (req.query.accountId) {
-    reels = reels.filter(
-      r => r.sourceId === req.query.accountId
-    );
+    if (req.query.unused === 'true') {
+      reels = reels.filter(
+        reel => !reel.used
+      );
+    }
+
+    res.json(reels);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
   }
+});
 
-  if (req.query.unused === 'true') {
-    reels = reels.filter(
-      r => !r.used && !r.reserved
-    );
+
+app.get('/api/reels/:id', async (req, res) => {
+  try {
+    const db = await readDb();
+
+    const reel =
+      findReel(db, req.params.id);
+
+    if (!reel) {
+      return res.status(404).json({
+        error: 'Reel not found.'
+      });
+    }
+
+    res.json(reel);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
   }
-
-  res.json(reels);
 });
 
 
@@ -379,55 +485,53 @@ app.get('/api/reels', async (req, res) => {
    RANDOM BATCH
 ========================= */
 
-app.post('/api/batch/random', async (_req, res) => {
+app.post('/api/batch/random', async (req, res) => {
+  try {
+    const db = await readDb();
 
-  const db = await loadDb();
+    const count =
+      Math.max(
+        1,
+        Math.min(
+          Number(req.body.count) || 10,
+          50
+        )
+      );
 
-  const pool = db.reels.filter(
-    r => !r.used && !r.reserved
-  );
+    let available =
+      db.reels.filter(
+        reel => !reel.used
+      );
 
-  const chosen = shuffle(pool).slice(0, 10);
+    available =
+      available.sort(
+        () => Math.random() - 0.5
+      );
 
-  if (chosen.length < 10) {
-    return res.status(409).json({
-      error:
-        `Only ${chosen.length} unused Reels are available; need 10.`
+    const selected =
+      available.slice(0, count);
+
+    const batch = {
+      id: crypto.randomUUID(),
+      createdAt:
+        new Date().toISOString(),
+      reelIds:
+        selected.map(reel => reel.id)
+    };
+
+    db.batches.push(batch);
+
+    await writeDb(db);
+
+    res.json({
+      batch,
+      reels: selected
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
     });
   }
-
-  const batch = {
-    id: id('batch'),
-    createdAt: new Date().toISOString(),
-    count: chosen.length,
-    status: 'selected'
-  };
-
-  for (const reel of chosen) {
-    reel.reserved = true;
-  }
-
-  const jobs = chosen.map(reel => ({
-    id: id('job'),
-    batchId: batch.id,
-    reelId: reel.id,
-    status: 'selected',
-    hook: '',
-    caption: reel.caption || '',
-    outputUrl: null,
-    error: null
-  }));
-
-  db.batches.push(batch);
-  db.jobs.push(...jobs);
-
-  await saveDb(db);
-
-  res.json({
-    batch,
-    jobs,
-    reels: chosen
-  });
 });
 
 
@@ -435,14 +539,15 @@ app.post('/api/batch/random', async (_req, res) => {
    DOWNLOAD VIDEO
 ========================= */
 
-async function download(url, output) {
+async function downloadFile(url, destination) {
+  if (!url) {
+    throw new Error(
+      'Reel does not have a video URL.'
+    );
+  }
 
-  const response = await fetch(
-    url,
-    {
-      redirect: 'follow'
-    }
-  );
+  const response =
+    await fetch(url);
 
   if (!response.ok) {
     throw new Error(
@@ -450,91 +555,40 @@ async function download(url, output) {
     );
   }
 
-  const buffer = Buffer.from(
-    await response.arrayBuffer()
-  );
-
-  if (buffer.length < 1000) {
-    throw new Error(
-      'Downloaded video is too small'
+  const buffer =
+    Buffer.from(
+      await response.arrayBuffer()
     );
-  }
 
   await fs.writeFile(
-    output,
+    destination,
     buffer
   );
+
+  return destination;
 }
 
 
 /* =========================
-   FFMPEG RENDER
+   EXTRACT FRAMES
 ========================= */
 
-async function renderVideo(
-  input,
-  output,
-  hook
+async function extractFrames(
+  videoPath,
+  outputDir
 ) {
-
-  const safe = String(hook || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/'/g, "\\'")
-    .replace(/:/g, '\\:')
-    .replace(/%/g, '\\%');
-
-  const vf =
-    `scale=1280:720:force_original_aspect_ratio=decrease,` +
-    `pad=1280:720:(ow-iw)/2:(oh-ih)/2,` +
-    `drawtext=` +
-    `fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:` +
-    `text='${safe}':` +
-    `fontcolor=white:` +
-    `fontsize=46:` +
-    `borderw=3:` +
-    `bordercolor=black:` +
-    `x=(w-text_w)/2:` +
-    `y=34`;
-
-  await exec(
-    'ffmpeg',
-    [
-      '-y',
-      '-i',
-      input,
-      '-vf',
-      vf,
-      '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-crf',
-      '22',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '128k',
-      '-movflags',
-      '+faststart',
-      output
-    ],
-    {
-      maxBuffer: 1024 * 1024 * 10
-    }
-  );
-}
-
-/* =========================
-   AI CONTENT ANALYSIS
-========================= */
-
-async function extractFrames(videoPath, prefix) {
-  const pattern = path.join(
-    RAW,
-    `${prefix}_%02d.jpg`
+  await fs.mkdir(
+    outputDir,
+    { recursive: true }
   );
 
-  await exec(
+  const outputPattern =
+    path.join(
+      outputDir,
+      'frame-%02d.jpg'
+    );
+
+  await execFileAsync(
     'ffmpeg',
     [
       '-y',
@@ -544,37 +598,49 @@ async function extractFrames(videoPath, prefix) {
       'fps=1/3,scale=640:-1',
       '-frames:v',
       '6',
-      pattern
+      outputPattern
     ],
     {
-      maxBuffer: 1024 * 1024 * 10
+      maxBuffer:
+        10 * 1024 * 1024
     }
   );
 
-  const files = (
-    await fs.readdir(RAW)
-  )
-    .filter(
-      name =>
-        name.startsWith(`${prefix}_`) &&
-        name.endsWith('.jpg')
-    )
-    .sort();
+  const files =
+    await fs.readdir(
+      outputDir
+    );
 
-  return files.map(
-    name =>
-      path.join(RAW, name)
-  );
+  return files
+    .filter(
+      file =>
+        file.endsWith('.jpg')
+    )
+    .sort()
+    .map(
+      file =>
+        path.join(
+          outputDir,
+          file
+        )
+    );
 }
 
 
-async function analyzeWithOpenRouter(
+/* =========================
+   OPENROUTER VISION
+========================= */
+
+async function analyzeWithAI(
   framePaths,
-  style
+  originalCaption
 ) {
-  if (!process.env.OPENROUTER_API_KEY) {
+  const apiKey =
+    process.env.OPENROUTER_API_KEY;
+
+  if (!apiKey) {
     throw new Error(
-      'OPENROUTER_API_KEY is not configured on the server'
+      'OPENROUTER_API_KEY is not configured in Render.'
     );
   }
 
@@ -582,27 +648,28 @@ async function analyzeWithOpenRouter(
     {
       type: 'text',
       text: `
-You are the content analyst for a viral Instagram Reels remix tool.
+You are analyzing an Instagram Reel.
 
-Analyze the supplied video frames together.
+IMPORTANT:
+Analyze ALL supplied frames together.
 
-Your job:
-1. Understand what is actually happening in the video.
-2. Identify the main situation, joke, reaction, conflict,
-   surprising moment or emotional beat.
-3. Do NOT invent events that are not visible.
-4. Do NOT create generic hooks that could fit any video.
-5. Create 5 short viral Instagram Reel hooks.
-6. Every hook MUST clearly relate to the specific video.
-7. Hooks should feel natural for Gen Z / millennial social media.
-8. Avoid explaining the entire video.
-9. Keep each hook under 12 words.
-10. Style: ${style}
+Your job is to understand what is ACTUALLY happening in the video.
 
-Return ONLY valid JSON in exactly this format:
+Do NOT invent dialogue.
+Do NOT invent people, events, locations or context.
+Do NOT assume something happened if it is not visible.
+Do NOT write generic hooks that could apply to any random video.
+
+Create hooks that are specifically relevant to THIS video.
+
+The hooks should feel natural for a viral Instagram Reel.
+
+Keep each hook under 12 words.
+
+Return exactly valid JSON in this format:
 
 {
-  "summary": "short description of what happens",
+  "summary": "one short factual description of what happens",
   "hooks": [
     "hook 1",
     "hook 2",
@@ -610,19 +677,25 @@ Return ONLY valid JSON in exactly this format:
     "hook 4",
     "hook 5"
   ],
-  "caption": "short Instagram caption"
+  "caption": "short caption specifically about this Reel"
 }
-      `.trim()
+
+Existing Instagram caption, if available:
+${originalCaption || '(none)'}
+`
     }
   ];
 
-  for (const framePath of framePaths) {
+  for (
+    const framePath of framePaths
+  ) {
+    const image =
+      await fs.readFile(
+        framePath
+      );
+
     const base64 =
-      (
-        await fs.readFile(
-          framePath
-        )
-      ).toString('base64');
+      image.toString('base64');
 
     content.push({
       type: 'image_url',
@@ -633,404 +706,543 @@ Return ONLY valid JSON in exactly this format:
     });
   }
 
-  const response = await fetch(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization:
-          `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'Content-Type':
-          'application/json',
-        'HTTP-Referer':
-          'https://squin1983.github.io/Clipper/',
-        'X-Title':
-          'Clipper'
-      },
-      body: JSON.stringify({
-        model: 'openrouter/free',
-        messages: [
-          {
-            role: 'user',
-            content
-          }
-        ],
-        temperature: 0.8,
-        max_tokens: 700
-      })
-    }
-  );
+  const response =
+    await fetch(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization':
+            `Bearer ${apiKey}`,
+          'Content-Type':
+            'application/json',
+          'HTTP-Referer':
+            'https://squin1983.github.io/Clipper/',
+          'X-Title':
+            'Clipper'
+        },
+        body:
+          JSON.stringify({
+            model:
+              'openrouter/free',
+            messages: [
+              {
+                role: 'user',
+                content
+              }
+            ],
+            temperature: 0.8,
+            max_tokens: 700
+          })
+      }
+    );
+
+  if (!response.ok) {
+    const body =
+      await response.text();
+
+    throw new Error(
+      `OpenRouter failed: ${response.status} ${body}`
+    );
+  }
 
   const data =
     await response.json();
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error?.message ||
-      `OpenRouter failed: ${response.status}`
-    );
-  }
-
   const text =
-    data?.choices?.[0]?.message?.content;
+    data.choices?.[0]?.message?.content;
 
   if (!text) {
     throw new Error(
-      'OpenRouter returned no analysis'
+      'OpenRouter returned no AI response.'
     );
   }
 
-  const cleaned =
-    String(text)
-      .replace(/^```json\s*/i, '')
-      .replace(/^```\s*/i, '')
-      .replace(/\s*```$/i, '')
-      .trim();
+  let cleaned =
+    text.trim();
+
+  if (
+    cleaned.startsWith('```')
+  ) {
+    cleaned =
+      cleaned
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+  }
 
   let result;
 
   try {
-    result = JSON.parse(cleaned);
+    result =
+      JSON.parse(cleaned);
   } catch {
     throw new Error(
-      'AI returned invalid JSON'
+      `AI returned invalid JSON: ${cleaned}`
     );
   }
 
   if (
-    !result.summary ||
-    !Array.isArray(result.hooks) ||
-    !result.hooks.length
+    !Array.isArray(result.hooks)
   ) {
-    throw new Error(
-      'AI returned incomplete analysis'
-    );
+    result.hooks = [];
   }
+
+  result.hooks =
+    result.hooks
+      .filter(Boolean)
+      .slice(0, 5);
 
   return {
     summary:
-      String(result.summary),
+      result.summary || '',
     hooks:
-      result.hooks
-        .map(x => String(x).trim())
-        .filter(Boolean)
-        .slice(0, 5),
+      result.hooks,
     caption:
-      String(
-        result.caption || ''
-      ).trim()
+      result.caption || ''
   };
 }
 
 
+/* =========================
+   AI ANALYZE REEL
+========================= */
+
 app.post(
   '/api/reels/:id/analyze',
   async (req, res) => {
-    const db =
-      await loadDb();
+    const workId =
+      crypto.randomUUID();
 
-    const reel =
-      db.reels.find(
-        x =>
-          x.id === req.params.id
-      );
-
-    if (!reel) {
-      return res.status(404).json({
-        error: 'reel not found'
-      });
-    }
-
-    if (!reel.videoUrl) {
-      return res.status(400).json({
-        error:
-          'reel has no video URL'
-      });
-    }
-
-    const style =
-      String(
-        req.body?.style ||
-        'Relatable'
-      );
-
-    const prefix =
-      `analysis_${crypto.randomUUID()}`;
-
-    const videoPath =
+    const workDir =
       path.join(
         RAW,
-        `${prefix}.mp4`
+        workId
       );
 
-    let framePaths = [];
-
     try {
-      await download(
+      const db =
+        await readDb();
+
+      const reel =
+        findReel(
+          db,
+          req.params.id
+        );
+
+      if (!reel) {
+        return res.status(404).json({
+          error:
+            'Reel not found.'
+        });
+      }
+
+      await fs.mkdir(
+        workDir,
+        {
+          recursive: true
+        }
+      );
+
+      const videoPath =
+        path.join(
+          workDir,
+          'reel.mp4'
+        );
+
+      const framesDir =
+        path.join(
+          workDir,
+          'frames'
+        );
+
+      console.log(
+        `Downloading Reel ${reel.id}`
+      );
+
+      await downloadFile(
         reel.videoUrl,
         videoPath
       );
 
-      framePaths =
+      console.log(
+        `Extracting frames for ${reel.id}`
+      );
+
+      const frames =
         await extractFrames(
           videoPath,
-          prefix
+          framesDir
         );
 
-      if (!framePaths.length) {
+      if (!frames.length) {
         throw new Error(
-          'Could not extract video frames'
+          'Could not extract video frames.'
         );
       }
 
-      const result =
-        await analyzeWithOpenRouter(
-          framePaths,
-          style
+      console.log(
+        `Sending ${frames.length} frames to AI`
+      );
+
+      const analysis =
+        await analyzeWithAI(
+          frames,
+          reel.caption
         );
 
-      res.json({
-        reelId: reel.id,
-        ...result
-      });
+      reel.aiAnalysis =
+        analysis;
 
+      reel.updatedAt =
+        new Date().toISOString();
+
+      await writeDb(db);
+
+      res.json({
+        ok: true,
+        reelId: reel.id,
+        analysis
+      });
     } catch (error) {
+      console.error(
+        'AI analysis error:',
+        error
+      );
 
       res.status(500).json({
         error:
           error.message
       });
-
     } finally {
-
-      await fs.rm(
-        videoPath,
-        {
-          force: true
-        }
-      ).catch(() => {});
-
-      for (
-        const framePath
-        of framePaths
-      ) {
+      try {
         await fs.rm(
-          framePath,
+          workDir,
           {
+            recursive: true,
             force: true
           }
-        ).catch(() => {});
-      }
-    }
-  }
-);
-/* =========================
-   RENDER JOB
-========================= */
-
-app.post(
-  '/api/jobs/:id/render',
-  async (req, res) => {
-
-    const db = await loadDb();
-
-    const job = db.jobs.find(
-      x => x.id === req.params.id
-    );
-
-    if (!job) {
-      return res.status(404).json({
-        error: 'job not found'
-      });
-    }
-
-    const reel = db.reels.find(
-      x => x.id === job.reelId
-    );
-
-    if (!reel) {
-      return res.status(404).json({
-        error: 'reel not found'
-      });
-    }
-
-    job.status = 'rendering';
-
-    job.hook = String(
-      req.body.hook || ''
-    );
-
-    job.caption = String(
-      req.body.caption ??
-      reel.caption ??
-      ''
-    );
-
-    await saveDb(db);
-
-    try {
-
-      const base = job.id;
-
-      const input =
-        path.join(
-          RAW,
-          `${base}.mp4`
         );
-
-      const output =
-        path.join(
-          RENDERED,
-          `${base}.mp4`
-        );
-
-      await download(
-        reel.videoUrl,
-        input
-      );
-
-      await renderVideo(
-        input,
-        output,
-        job.hook
-      );
-
-      job.status = 'ready';
-
-      job.outputUrl =
-        `/media/${base}.mp4`;
-
-      job.error = null;
-
-      reel.reserved = false;
-      reel.used = true;
-
-      await saveDb(db);
-
-      res.json(job);
-
-    } catch (error) {
-
-      job.status = 'error';
-      job.error = error.message;
-
-      reel.reserved = false;
-
-      await saveDb(db);
-
-      res.status(500).json({
-        error: error.message,
-        job
-      });
+      } catch {}
     }
   }
 );
 
 
 /* =========================
-   JOB
+   JOBS
 ========================= */
 
 app.get(
   '/api/jobs/:id',
   async (req, res) => {
+    try {
+      const db =
+        await readDb();
 
-    const db = await loadDb();
+      const job =
+        db.jobs.find(
+          item =>
+            item.id ===
+            req.params.id
+        );
 
-    const job = db.jobs.find(
-      x => x.id === req.params.id
-    );
+      if (!job) {
+        return res.status(404).json({
+          error:
+            'Job not found.'
+        });
+      }
 
-    if (!job) {
-      return res.status(404).json({
-        error: 'job not found'
+      res.json(job);
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
       });
     }
-
-    res.json(job);
   }
 );
 
 
 /* =========================
-   ALL BATCHES
+   RENDER
 ========================= */
 
-app.get('/api/batches', async (_req, res) => {
+app.post(
+  '/api/jobs/:id/render',
+  async (req, res) => {
+    try {
+      const db =
+        await readDb();
 
-  const db = await loadDb();
+      const reel =
+        findReel(
+          db,
+          req.body.reelId
+        );
 
-  const result =
-    db.batches
-      .slice()
-      .reverse()
-      .map(batch => {
+      if (!reel) {
+        return res.status(404).json({
+          error:
+            'Reel not found.'
+        });
+      }
 
-        const jobs =
-          db.jobs.filter(
-            job => job.batchId === batch.id
+      const hook =
+        String(
+          req.body.hook || ''
+        ).trim();
+
+      if (!hook) {
+        return res.status(400).json({
+          error:
+            'Hook is required.'
+        });
+      }
+
+      const job =
+        db.jobs.find(
+          item =>
+            item.id ===
+            req.params.id
+        ) ||
+        {
+          id:
+            req.params.id,
+          reelId:
+            reel.id,
+          status:
+            'rendering',
+          createdAt:
+            new Date().toISOString()
+        };
+
+      job.status =
+        'rendering';
+
+      db.jobs =
+        db.jobs.filter(
+          item =>
+            item.id !==
+            job.id
+        );
+
+      db.jobs.push(job);
+
+      await writeDb(db);
+
+      const workDir =
+        path.join(
+          RAW,
+          job.id
+        );
+
+      await fs.mkdir(
+        workDir,
+        {
+          recursive: true
+        }
+      );
+
+      const inputPath =
+        path.join(
+          workDir,
+          'input.mp4'
+        );
+
+      const outputPath =
+        path.join(
+          OUTPUT,
+          `${job.id}.mp4`
+        );
+
+      await downloadFile(
+        reel.videoUrl,
+        inputPath
+      );
+
+      const font =
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+
+      const escapedHook =
+        hook
+          .replace(/\\/g, '\\\\')
+          .replace(/'/g, "\\'")
+          .replace(/:/g, '\\:')
+          .replace(/%/g, '\\%');
+
+      const drawText =
+        `drawtext=fontfile=${font}:` +
+        `text='${escapedHook}':` +
+        `fontcolor=white:` +
+        `fontsize=42:` +
+        `borderw=4:` +
+        `bordercolor=black:` +
+        `x=(w-text_w)/2:` +
+        `y=70:` +
+        `box=1:` +
+        `boxcolor=black@0.35:` +
+        `boxborderw=18`;
+
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-i',
+          inputPath,
+          '-vf',
+          drawText,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-crf',
+          '23',
+          '-c:a',
+          'aac',
+          '-movflags',
+          '+faststart',
+          outputPath
+        ],
+        {
+          maxBuffer:
+            20 * 1024 * 1024
+        }
+      );
+
+      job.status =
+        'ready';
+
+      job.outputUrl =
+        `/media/${path.basename(
+          outputPath
+        )}`;
+
+      job.updatedAt =
+        new Date().toISOString();
+
+      reel.used =
+        true;
+
+      await writeDb(db);
+
+      res.json({
+        ok: true,
+        job
+      });
+    } catch (error) {
+      console.error(
+        'Render error:',
+        error
+      );
+
+      try {
+        const db =
+          await readDb();
+
+        const job =
+          db.jobs.find(
+            item =>
+              item.id ===
+              req.params.id
           );
 
-        const reels =
-          jobs
-            .map(job =>
-              db.reels.find(
-                reel => reel.id === job.reelId
-              )
-            )
-            .filter(Boolean);
+        if (job) {
+          job.status =
+            'failed';
 
-        return {
-          batch,
-          jobs,
-          reels
-        };
+          job.error =
+            error.message;
+
+          await writeDb(db);
+        }
+      } catch {}
+
+      res.status(500).json({
+        error:
+          error.message
       });
-
-  res.json(result);
-});
+    }
+  }
+);
 
 
 /* =========================
-   SINGLE BATCH
+   BATCHES
 ========================= */
+
+app.get(
+  '/api/batches',
+  async (req, res) => {
+    try {
+      const db =
+        await readDb();
+
+      res.json(
+        db.batches
+          .slice()
+          .reverse()
+      );
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
+  }
+);
 
 app.get(
   '/api/batches/:id',
   async (req, res) => {
+    try {
+      const db =
+        await readDb();
 
-    const db = await loadDb();
+      const batch =
+        db.batches.find(
+          item =>
+            item.id ===
+            req.params.id
+        );
 
-    const batch = db.batches.find(
-      x => x.id === req.params.id
-    );
+      if (!batch) {
+        return res.status(404).json({
+          error:
+            'Batch not found.'
+        });
+      }
 
-    if (!batch) {
-      return res.status(404).json({
-        error: 'batch not found'
+      const reels =
+        batch.reelIds
+          .map(id =>
+            findReel(db, id)
+          )
+          .filter(Boolean);
+
+      res.json({
+        batch,
+        reels
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
       });
     }
-
-    const jobs =
-      db.jobs.filter(
-        job => job.batchId === batch.id
-      );
-
-    const reels =
-      jobs
-        .map(job =>
-          db.reels.find(
-            reel => reel.id === job.reelId
-          )
-        )
-        .filter(Boolean);
-
-    res.json({
-      batch,
-      jobs,
-      reels
-    });
   }
+);
+
+
+/* =========================
+   MEDIA
+========================= */
+
+app.use(
+  '/media',
+  express.static(OUTPUT)
 );
 
 
@@ -1038,12 +1250,22 @@ app.get(
    START
 ========================= */
 
-app.listen(
-  PORT,
-  '0.0.0.0',
-  () => {
-    console.log(
-      `Clipper backend listening on ${PORT}`
+ensureStorage()
+  .then(() => {
+    app.listen(
+      PORT,
+      () => {
+        console.log(
+          `Clipper backend running on port ${PORT}`
+        );
+      }
     );
-  }
-);
+  })
+  .catch(error => {
+    console.error(
+      'Startup failed:',
+      error
+    );
+
+    process.exit(1);
+  });
