@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '1.6';
+const VERSION = '1.7';
 
 const APIFY_TOKEN = process.env.APIFY_TOKEN || '';
 
@@ -100,10 +100,10 @@ function loadDb() {
   }
 }
 
-function saveDb(db) {
+function saveDb(database) {
   fs.writeFileSync(
     DB_FILE,
-    JSON.stringify(db, null, 2),
+    JSON.stringify(database, null, 2),
     'utf8'
   );
 }
@@ -181,7 +181,6 @@ function requestJson(url, options = {}) {
     const target = new URL(url);
 
     const isHttps = target.protocol === 'https:';
-
     const transport = isHttps ? https : http;
 
     const requestOptions = {
@@ -232,7 +231,7 @@ function requestJson(url, options = {}) {
                 ? JSON.parse(body)
                 : null
             );
-          } catch (error) {
+          } catch {
             reject(
               new Error(
                 `Invalid JSON response: ${body.slice(
@@ -541,18 +540,6 @@ async function runApifyProfile(username) {
   console.log(
     `Apify run started: ${runId}`
   );
-
-  /*
-   * IMPORTANT:
-   *
-   * Apify documents RUNNING as a normal transitional
-   * state. The previous version stopped after 80 × 3 sec
-   * and incorrectly treated RUNNING as an error.
-   *
-   * We now poll for up to 20 minutes.
-   *
-   * 120 attempts × 10 seconds = 20 minutes.
-   */
 
   const MAX_ATTEMPTS = 120;
   const POLL_INTERVAL_MS = 10000;
@@ -894,9 +881,7 @@ async function extractFrames(
    IMAGE -> DATA URL
 ========================================================= */
 
-function imageToDataUrl(
-  filePath
-) {
+function imageToDataUrl(filePath) {
   const buffer =
     fs.readFileSync(
       filePath
@@ -1118,12 +1103,15 @@ app.get(
    ACCOUNTS
 ========================================================= */
 
+/*
+ * IMPORTANT:
+ * Frontend expects a plain array here.
+ */
+
 app.get(
   '/api/accounts',
   (req, res) => {
-    res.json({
-      accounts: db.accounts
-    });
+    res.json(db.accounts);
   }
 );
 
@@ -1151,9 +1139,9 @@ app.post(
         );
 
       if (existing) {
-        return res.json({
-          account: existing
-        });
+        return res.json(
+          existing
+        );
       }
 
       const account = {
@@ -1169,9 +1157,9 @@ app.post(
 
       saveDb(db);
 
-      res.status(201).json({
+      res.status(201).json(
         account
-      });
+      );
     } catch (error) {
       console.error(
         'Create account error:',
@@ -1415,6 +1403,56 @@ app.post(
    REELS
 ========================================================= */
 
+/*
+ * IMPORTANT:
+ * Frontend calls:
+ * GET /api/reels?limit=1000
+ *
+ * Frontend expects a plain array.
+ */
+
+app.get(
+  '/api/reels',
+  (req, res) => {
+    const requestedLimit =
+      Number(
+        req.query.limit || 1000
+      );
+
+    const limit =
+      Math.min(
+        Number.isFinite(
+          requestedLimit
+        )
+          ? requestedLimit
+          : 1000,
+        5000
+      );
+
+    const reels =
+      [...db.reels]
+        .sort(
+          (a, b) =>
+            new Date(
+              b.publishedAt ||
+                b.createdAt ||
+                0
+            ) -
+            new Date(
+              a.publishedAt ||
+                a.createdAt ||
+                0
+            )
+        )
+        .slice(
+          0,
+          limit
+        );
+
+    res.json(reels);
+  }
+);
+
 app.get(
   '/api/accounts/:id/reels',
   (req, res) => {
@@ -1443,17 +1481,54 @@ app.get(
   }
 );
 
+/* =========================================================
+   BATCHES
+========================================================= */
+
+/*
+ * Frontend expects:
+ * GET /api/batches
+ *
+ * and expects a plain array.
+ */
+
+app.get(
+  '/api/batches',
+  (req, res) => {
+    const batches =
+      [...db.batches]
+        .sort(
+          (a, b) =>
+            new Date(
+              b.createdAt || 0
+            ) -
+            new Date(
+              a.createdAt || 0
+            )
+        );
+
+    res.json(batches);
+  }
+);
+
 app.get(
   '/api/batch/random',
   (req, res) => {
     const accountId =
       req.query.accountId;
 
+    const requestedLimit =
+      Number(
+        req.query.limit || 10
+      );
+
     const limit =
       Math.min(
-        Number(
-          req.query.limit || 10
-        ),
+        Number.isFinite(
+          requestedLimit
+        )
+          ? requestedLimit
+          : 10,
         100
       );
 
@@ -1656,6 +1731,25 @@ app.post(
       });
     }
 
+    /*
+     * If frontend sends a hook directly,
+     * save it before rendering.
+     */
+    const requestedHook =
+      String(
+        req.body?.hook || ''
+      ).trim();
+
+    if (requestedHook) {
+      reel.selectedHook =
+        requestedHook;
+
+      reel.updatedAt =
+        nowIso();
+
+      saveDb(db);
+    }
+
     const jobId =
       id('job_');
 
@@ -1685,17 +1779,20 @@ app.post(
 
     saveDb(db);
 
+    /*
+     * Return immediately.
+     *
+     * Rendering continues in background.
+     */
+
     res.json({
       ok: true,
       job
     });
 
-    /*
-     * Rendering runs in background.
-     * This keeps the API response fast.
-     */
-
     (async () => {
+      let workDir = null;
+
       try {
         job.status =
           'processing';
@@ -1705,7 +1802,7 @@ app.post(
 
         saveDb(db);
 
-        const workDir =
+        workDir =
           fs.mkdtempSync(
             path.join(
               '/tmp/',
@@ -1725,142 +1822,135 @@ app.post(
             `${jobId}.mp4`
           );
 
-        try {
-          console.log(
-            `Render ${jobId}: downloading source`
-          );
+        console.log(
+          `Render ${jobId}: downloading source`
+        );
 
-          await downloadFile(
-            reel.videoUrl,
-            sourcePath
-          );
+        await downloadFile(
+          reel.videoUrl,
+          sourcePath
+        );
 
-          const hook =
-            reel.selectedHook ||
-            reel.analysis?.hook ||
-            '';
+        const hook =
+          reel.selectedHook ||
+          reel.analysis?.hook ||
+          '';
 
-          const escapedHook =
-            String(hook)
-              .replace(
-                /\\/g,
-                '\\\\'
-              )
-              .replace(
-                /'/g,
-                "\\'"
-              )
-              .replace(
-                /:/g,
-                '\\:'
-              )
-              .replace(
-                /\[/g,
-                '\\['
-              )
-              .replace(
-                /\]/g,
-                '\\]'
-              );
-
-          /*
-           * Basic vertical Reel render.
-           *
-           * The source is scaled to fill 1080x1920
-           * and the selected hook is placed near
-           * the top.
-           */
-
-          const filter =
-            [
-              'scale=1080:1920:force_original_aspect_ratio=increase',
-              'crop=1080:1920',
-              'setsar=1',
-              escapedHook
-                ? `drawtext=text='${escapedHook}':fontcolor=white:fontsize=58:borderw=4:bordercolor=black:x=(w-text_w)/2:y=140:box=1:boxcolor=black@0.35:boxborderw=20`
-                : null
-            ]
-              .filter(Boolean)
-              .join(',');
-
-          console.log(
-            `Render ${jobId}: ffmpeg`
-          );
-
-          await execFileAsync(
-            'ffmpeg',
-            [
-              '-y',
-              '-i',
-              sourcePath,
-              '-vf',
-              filter,
-              '-c:v',
-              'libx264',
-              '-preset',
-              'veryfast',
-              '-crf',
-              '23',
-              '-c:a',
-              'aac',
-              '-b:a',
-              '128k',
-              '-movflags',
-              '+faststart',
-              outputPath
-            ],
-            {
-              timeout:
-                300000
-            }
-          );
-
-          if (
-            !fs.existsSync(
-              outputPath
+        /*
+         * Escape text for FFmpeg drawtext.
+         */
+        const escapedHook =
+          String(hook)
+            .replace(
+              /\\/g,
+              '\\\\'
             )
-          ) {
-            throw new Error(
-              'FFmpeg completed but output file was not created.'
+            .replace(
+              /'/g,
+              "\\'"
+            )
+            .replace(
+              /:/g,
+              '\\:'
+            )
+            .replace(
+              /\[/g,
+              '\\['
+            )
+            .replace(
+              /\]/g,
+              '\\]'
+            )
+            .replace(
+              /%/g,
+              '\\%'
             );
+
+        /*
+         * Vertical 1080x1920 Reel.
+         */
+        const filter =
+          [
+            'scale=1080:1920:force_original_aspect_ratio=increase',
+            'crop=1080:1920',
+            'setsar=1',
+
+            escapedHook
+              ? `drawtext=text='${escapedHook}':fontcolor=white:fontsize=58:borderw=4:bordercolor=black:x=(w-text_w)/2:y=140:box=1:boxcolor=black@0.35:boxborderw=20`
+              : null
+          ]
+            .filter(Boolean)
+            .join(',');
+
+        console.log(
+          `Render ${jobId}: ffmpeg`
+        );
+
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+            '-i',
+            sourcePath,
+            '-vf',
+            filter,
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '23',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '128k',
+            '-movflags',
+            '+faststart',
+            outputPath
+          ],
+          {
+            timeout:
+              300000
           }
+        );
 
-          job.status =
-            'completed';
-
-          job.outputUrl =
-            `/api/jobs/${jobId}/download`;
-
-          job.updatedAt =
-            nowIso();
-
-          reel.render = {
-            jobId,
-            status:
-              'completed',
-            outputUrl:
-              job.outputUrl,
-            updatedAt:
-              nowIso()
-          };
-
-          saveDb(db);
-
-          console.log(
-            `Render ${jobId}: completed`
+        if (
+          !fs.existsSync(
+            outputPath
+          )
+        ) {
+          throw new Error(
+            'FFmpeg completed but output file was not created.'
           );
-        } finally {
-          try {
-            fs.rmSync(
-              workDir,
-              {
-                recursive:
-                  true,
-                force: true
-              }
-            );
-          } catch {}
         }
+
+        job.status =
+          'completed';
+
+        job.outputUrl =
+          `/api/jobs/${jobId}/download`;
+
+        job.updatedAt =
+          nowIso();
+
+        reel.render = {
+          jobId,
+
+          status:
+            'completed',
+
+          outputUrl:
+            job.outputUrl,
+
+          updatedAt:
+            nowIso()
+        };
+
+        saveDb(db);
+
+        console.log(
+          `Render ${jobId}: completed`
+        );
       } catch (error) {
         console.error(
           `Render ${jobId} failed:`,
@@ -1899,6 +1989,19 @@ app.post(
         };
 
         saveDb(db);
+      } finally {
+        if (workDir) {
+          try {
+            fs.rmSync(
+              workDir,
+              {
+                recursive:
+                  true,
+                force: true
+              }
+            );
+          } catch {}
+        }
       }
     })();
   }
@@ -1935,52 +2038,71 @@ app.get(
    DOWNLOAD
 ========================================================= */
 
-app.get(
-  '/api/jobs/:id/download',
-  (req, res) => {
-    const job =
-      db.jobs.find(
-        (item) =>
-          item.id ===
-          req.params.id
-      );
+function sendRenderedFile(
+  req,
+  res
+) {
+  const job =
+    db.jobs.find(
+      (item) =>
+        item.id ===
+        req.params.id
+    );
 
-    if (!job) {
-      return res.status(404).send(
-        'Render job not found.'
-      );
-    }
-
-    if (
-      job.status !==
-      'completed'
-    ) {
-      return res.status(409).send(
-        'Render is not completed yet.'
-      );
-    }
-
-    const filePath =
-      path.join(
-        RENDER_DIR,
-        `${job.id}.mp4`
-      );
-
-    if (
-      !fs.existsSync(
-        filePath
-      )
-    ) {
-      return res.status(404).send(
-        'Rendered file no longer exists.'
-      );
-    }
-
-    res.download(
-      filePath,
-      `clipper-${job.reelId}.mp4`
+  if (!job) {
+    return res.status(404).send(
+      'Render job not found.'
     );
   }
+
+  if (
+    job.status !==
+    'completed'
+  ) {
+    return res.status(409).send(
+      'Render is not completed yet.'
+    );
+  }
+
+  const filePath =
+    path.join(
+      RENDER_DIR,
+      `${job.id}.mp4`
+    );
+
+  if (
+    !fs.existsSync(
+      filePath
+    )
+  ) {
+    return res.status(404).send(
+      'Rendered file no longer exists.'
+    );
+  }
+
+  res.download(
+    filePath,
+    `clipper-${job.reelId}.mp4`
+  );
+}
+
+/*
+ * Main download endpoint.
+ */
+app.get(
+  '/api/jobs/:id/download',
+  sendRenderedFile
+);
+
+/*
+ * Frontend compatibility endpoint.
+ *
+ * The current frontend uses /file,
+ * while the backend historically used /download.
+ */
+app.get(
+  '/api/jobs/:id/file',
+  sendRenderedFile
 );
 
 /* =========================================================
