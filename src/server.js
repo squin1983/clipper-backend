@@ -20,17 +20,39 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '1.7';
+/* =========================================================
+   VERSION
+========================================================= */
 
-const APIFY_TOKEN = process.env.APIFY_TOKEN || '';
+const VERSION = '1.8';
 
+/* =========================================================
+   APIFY
+========================================================= */
+
+const APIFY_TOKEN =
+  process.env.APIFY_TOKEN || '';
+
+/*
+ * New historical Reel scraper.
+ */
 const APIFY_ACTOR =
   process.env.APIFY_ACTOR ||
-  'instagram-scraper~instagram-profile-reels-scraper';
+  'scrapers_lat~instagram-reels-scraper';
 
-const APIFY_POSTS_PER_PROFILE = Number(
-  process.env.APIFY_POSTS_PER_PROFILE || 500
-);
+/*
+ * Number of Reel batches.
+ *
+ * 4 windows x 5 Reel attempts = approximately
+ * 20 Reel results per Sync.
+ */
+const HISTORICAL_REELS_PER_WINDOW = 5;
+
+const HISTORICAL_WINDOWS = 4;
+
+/* =========================================================
+   OPENROUTER
+========================================================= */
 
 const OPENROUTER_API_KEY =
   process.env.OPENROUTER_API_KEY || '';
@@ -38,6 +60,10 @@ const OPENROUTER_API_KEY =
 const OPENROUTER_MODEL =
   process.env.OPENROUTER_MODEL ||
   'openrouter/free';
+
+/* =========================================================
+   STORAGE
+========================================================= */
 
 const DB_FILE =
   process.env.CLIPPER_DB_FILE ||
@@ -47,8 +73,15 @@ const RENDER_DIR =
   process.env.CLIPPER_RENDER_DIR ||
   '/tmp/clipper-renders';
 
-fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-fs.mkdirSync(RENDER_DIR, { recursive: true });
+fs.mkdirSync(
+  path.dirname(DB_FILE),
+  { recursive: true }
+);
+
+fs.mkdirSync(
+  RENDER_DIR,
+  { recursive: true }
+);
 
 /* =========================================================
    DATABASE
@@ -69,33 +102,54 @@ function loadDb() {
       return createEmptyDb();
     }
 
-    const raw = fs.readFileSync(DB_FILE, 'utf8');
+    const raw =
+      fs.readFileSync(
+        DB_FILE,
+        'utf8'
+      );
 
     if (!raw.trim()) {
       return createEmptyDb();
     }
 
-    const parsed = JSON.parse(raw);
+    const parsed =
+      JSON.parse(raw);
 
     return {
-      accounts: Array.isArray(parsed.accounts)
-        ? parsed.accounts
-        : [],
+      accounts:
+        Array.isArray(
+          parsed.accounts
+        )
+          ? parsed.accounts
+          : [],
 
-      reels: Array.isArray(parsed.reels)
-        ? parsed.reels
-        : [],
+      reels:
+        Array.isArray(
+          parsed.reels
+        )
+          ? parsed.reels
+          : [],
 
-      batches: Array.isArray(parsed.batches)
-        ? parsed.batches
-        : [],
+      batches:
+        Array.isArray(
+          parsed.batches
+        )
+          ? parsed.batches
+          : [],
 
-      jobs: Array.isArray(parsed.jobs)
-        ? parsed.jobs
-        : []
+      jobs:
+        Array.isArray(
+          parsed.jobs
+        )
+          ? parsed.jobs
+          : []
     };
   } catch (error) {
-    console.error('Database load error:', error.message);
+    console.error(
+      'Database load error:',
+      error.message
+    );
+
     return createEmptyDb();
   }
 }
@@ -103,7 +157,11 @@ function loadDb() {
 function saveDb(database) {
   fs.writeFileSync(
     DB_FILE,
-    JSON.stringify(database, null, 2),
+    JSON.stringify(
+      database,
+      null,
+      2
+    ),
     'utf8'
   );
 }
@@ -117,7 +175,9 @@ let db = loadDb();
 function id(prefix = '') {
   return (
     prefix +
-    crypto.randomBytes(8).toString('hex')
+    crypto
+      .randomBytes(8)
+      .toString('hex')
   );
 }
 
@@ -151,9 +211,14 @@ function parseDate(value) {
     return null;
   }
 
-  const date = new Date(value);
+  const date =
+    new Date(value);
 
-  if (Number.isNaN(date.getTime())) {
+  if (
+    Number.isNaN(
+      date.getTime()
+    )
+  ) {
     return null;
   }
 
@@ -161,7 +226,9 @@ function parseDate(value) {
 }
 
 function safeJsonParse(value) {
-  if (typeof value !== 'string') {
+  if (
+    typeof value !== 'string'
+  ) {
     return value;
   }
 
@@ -173,201 +240,528 @@ function safeJsonParse(value) {
 }
 
 /* =========================================================
+   DATE HELPERS
+========================================================= */
+
+function startOfDay(date) {
+  const d =
+    new Date(date);
+
+  d.setHours(
+    0,
+    0,
+    0,
+    0
+  );
+
+  return d;
+}
+
+function addDays(date, days) {
+  const d =
+    new Date(date);
+
+  d.setDate(
+    d.getDate() + days
+  );
+
+  return d;
+}
+
+function dateOnly(date) {
+  const d =
+    new Date(date);
+
+  const year =
+    d.getFullYear();
+
+  const month =
+    String(
+      d.getMonth() + 1
+    ).padStart(2, '0');
+
+  const day =
+    String(
+      d.getDate()
+    ).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
+/*
+ * Returns a random integer between min and max inclusive.
+ */
+function randomInt(min, max) {
+  return (
+    Math.floor(
+      Math.random() *
+        (max - min + 1)
+    ) + min
+  );
+}
+
+/*
+ * Pick a random date inside a historical range.
+ */
+function randomDateBetween(
+  start,
+  end
+) {
+  const startTime =
+    start.getTime();
+
+  const endTime =
+    end.getTime();
+
+  const randomTime =
+    startTime +
+    Math.random() *
+      (endTime - startTime);
+
+  return new Date(
+    randomTime
+  );
+}
+
+/*
+ * Creates a random approximately
+ * one-month date window.
+ *
+ * Example:
+ *
+ * newer = 2026-03-01
+ * older = 2026-04-01
+ */
+function createRandomMonthWindow(
+  rangeStart,
+  rangeEnd
+) {
+  const start =
+    startOfDay(
+      rangeStart
+    );
+
+  const end =
+    startOfDay(
+      rangeEnd
+    );
+
+  const latestPossibleStart =
+    addDays(
+      end,
+      -28
+    );
+
+  const randomStart =
+    randomDateBetween(
+      start,
+      latestPossibleStart
+    );
+
+  const newer =
+    startOfDay(
+      randomStart
+    );
+
+  const older =
+    addDays(
+      newer,
+      randomInt(
+        21,
+        35
+      )
+    );
+
+  return {
+    newer: dateOnly(
+      newer
+    ),
+    older: dateOnly(
+      older
+    )
+  };
+}
+
+/*
+ * Generate the four historical windows.
+ *
+ * Window 1:
+ * last ~1 month
+ *
+ * Window 2:
+ * 1–3 months ago
+ *
+ * Window 3:
+ * 3–6 months ago
+ *
+ * Window 4:
+ * 6–24 months ago
+ *
+ * The exact month is randomized on every Sync.
+ */
+function createHistoricalWindows() {
+  const today =
+    startOfDay(
+      new Date()
+    );
+
+  const oneMonthAgo =
+    addDays(
+      today,
+      -30
+    );
+
+  const threeMonthsAgo =
+    addDays(
+      today,
+      -90
+    );
+
+  const sixMonthsAgo =
+    addDays(
+      today,
+      -180
+    );
+
+  const twentyFourMonthsAgo =
+    addDays(
+      today,
+      -730
+    );
+
+  const windows = [];
+
+  /*
+   * Recent:
+   * approximately last month.
+   */
+  windows.push(
+    createRandomMonthWindow(
+      oneMonthAgo,
+      today
+    )
+  );
+
+  /*
+   * 1–3 months ago.
+   */
+  windows.push(
+    createRandomMonthWindow(
+      threeMonthsAgo,
+      oneMonthAgo
+    )
+  );
+
+  /*
+   * 3–6 months ago.
+   */
+  windows.push(
+    createRandomMonthWindow(
+      sixMonthsAgo,
+      threeMonthsAgo
+    )
+  );
+
+  /*
+   * 6–24 months ago.
+   */
+  windows.push(
+    createRandomMonthWindow(
+      twentyFourMonthsAgo,
+      sixMonthsAgo
+    )
+  );
+
+  return windows;
+}
+
+/* =========================================================
    HTTP
 ========================================================= */
 
-function requestJson(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const target = new URL(url);
+function requestJson(
+  url,
+  options = {}
+) {
+  return new Promise(
+    (resolve, reject) => {
+      const target =
+        new URL(url);
 
-    const isHttps = target.protocol === 'https:';
-    const transport = isHttps ? https : http;
+      const isHttps =
+        target.protocol ===
+        'https:';
 
-    const requestOptions = {
-      method: options.method || 'GET',
-      hostname: target.hostname,
-      port:
-        target.port ||
-        (isHttps ? 443 : 80),
-      path:
-        target.pathname +
-        target.search,
-      headers: {
-        ...(options.headers || {})
-      }
-    };
+      const transport =
+        isHttps
+          ? https
+          : http;
 
-    const request = transport.request(
-      requestOptions,
-      (response) => {
-        let body = '';
+      const requestOptions = {
+        method:
+          options.method ||
+          'GET',
 
-        response.setEncoding('utf8');
+        hostname:
+          target.hostname,
 
-        response.on('data', (chunk) => {
-          body += chunk;
-        });
+        port:
+          target.port ||
+          (
+            isHttps
+              ? 443
+              : 80
+          ),
 
-        response.on('end', () => {
-          const statusCode =
-            response.statusCode || 0;
+        path:
+          target.pathname +
+          target.search,
 
-          if (
-            statusCode < 200 ||
-            statusCode >= 300
-          ) {
-            reject(
-              new Error(
-                `HTTP ${statusCode}: ${body.slice(0, 2000)}`
-              )
+        headers: {
+          ...(options.headers ||
+            {})
+        }
+      };
+
+      const request =
+        transport.request(
+          requestOptions,
+          (response) => {
+            let body = '';
+
+            response.setEncoding(
+              'utf8'
             );
 
-            return;
+            response.on(
+              'data',
+              (chunk) => {
+                body += chunk;
+              }
+            );
+
+            response.on(
+              'end',
+              () => {
+                const statusCode =
+                  response.statusCode ||
+                  0;
+
+                if (
+                  statusCode <
+                    200 ||
+                  statusCode >=
+                    300
+                ) {
+                  reject(
+                    new Error(
+                      `HTTP ${statusCode}: ${body.slice(
+                        0,
+                        2000
+                      )}`
+                    )
+                  );
+
+                  return;
+                }
+
+                try {
+                  resolve(
+                    body
+                      ? JSON.parse(
+                          body
+                        )
+                      : null
+                  );
+                } catch {
+                  reject(
+                    new Error(
+                      `Invalid JSON response: ${body.slice(
+                        0,
+                        2000
+                      )}`
+                    )
+                  );
+                }
+              }
+            );
           }
+        );
 
-          try {
-            resolve(
-              body
-                ? JSON.parse(body)
-                : null
-            );
-          } catch {
-            reject(
-              new Error(
-                `Invalid JSON response: ${body.slice(
-                  0,
-                  2000
-                )}`
-              )
-            );
-          }
-        });
-      }
-    );
+      const timeout =
+        Number(
+          options.timeout
+        ) || 60000;
 
-    const timeout =
-      Number(options.timeout) || 60000;
-
-    request.setTimeout(timeout, () => {
-      request.destroy(
-        new Error(
-          `Request timed out after ${timeout}ms`
-        )
+      request.setTimeout(
+        timeout,
+        () => {
+          request.destroy(
+            new Error(
+              `Request timed out after ${timeout}ms`
+            )
+          );
+        }
       );
-    });
 
-    request.on('error', reject);
+      request.on(
+        'error',
+        reject
+      );
 
-    if (options.body) {
-      request.write(options.body);
+      if (options.body) {
+        request.write(
+          options.body
+        );
+      }
+
+      request.end();
     }
-
-    request.end();
-  });
+  );
 }
 
 /* =========================================================
    DOWNLOAD
 ========================================================= */
 
-function downloadFile(url, destination) {
-  return new Promise((resolve, reject) => {
-    const target = new URL(url);
+function downloadFile(
+  url,
+  destination
+) {
+  return new Promise(
+    (resolve, reject) => {
+      const target =
+        new URL(url);
 
-    const transport =
-      target.protocol === 'https:'
-        ? https
-        : http;
+      const transport =
+        target.protocol ===
+        'https:'
+          ? https
+          : http;
 
-    const file =
-      fs.createWriteStream(destination);
+      const file =
+        fs.createWriteStream(
+          destination
+        );
 
-    const request = transport.get(
-      {
-        hostname: target.hostname,
-        port:
-          target.port ||
-          (target.protocol === 'https:'
-            ? 443
-            : 80),
-        path:
-          target.pathname +
-          target.search,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
-          Accept: '*/*'
-        }
-      },
-      (response) => {
-        const statusCode =
-          response.statusCode || 0;
+      const request =
+        transport.get(
+          {
+            hostname:
+              target.hostname,
 
-        if (
-          statusCode >= 300 &&
-          statusCode < 400 &&
-          response.headers.location
-        ) {
-          file.close();
+            port:
+              target.port ||
+              (
+                target.protocol ===
+                'https:'
+                  ? 443
+                  : 80
+              ),
 
-          try {
-            fs.unlinkSync(destination);
-          } catch {}
+            path:
+              target.pathname +
+              target.search,
 
-          downloadFile(
-            response.headers.location,
-            destination
-          )
-            .then(resolve)
-            .catch(reject);
+            headers: {
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
 
-          return;
-        }
+              Accept:
+                '*/*'
+            }
+          },
+          (response) => {
+            const statusCode =
+              response.statusCode ||
+              0;
 
-        if (
-          statusCode < 200 ||
-          statusCode >= 300
-        ) {
-          file.destroy();
+            if (
+              statusCode >=
+                300 &&
+              statusCode <
+                400 &&
+              response.headers
+                .location
+            ) {
+              file.close();
 
-          reject(
+              try {
+                fs.unlinkSync(
+                  destination
+                );
+              } catch {}
+
+              downloadFile(
+                response.headers
+                  .location,
+                destination
+              )
+                .then(resolve)
+                .catch(reject);
+
+              return;
+            }
+
+            if (
+              statusCode <
+                200 ||
+              statusCode >=
+                300
+            ) {
+              file.destroy();
+
+              reject(
+                new Error(
+                  `Download failed with HTTP ${statusCode}`
+                )
+              );
+
+              return;
+            }
+
+            response.pipe(
+              file
+            );
+
+            file.on(
+              'finish',
+              () => {
+                file.close(
+                  resolve
+                );
+              }
+            );
+          }
+        );
+
+      request.setTimeout(
+        120000,
+        () => {
+          request.destroy(
             new Error(
-              `Download failed with HTTP ${statusCode}`
+              'Download timed out'
             )
           );
-
-          return;
         }
+      );
 
-        response.pipe(file);
+      request.on(
+        'error',
+        (error) => {
+          file.destroy();
 
-        file.on('finish', () => {
-          file.close(resolve);
-        });
-      }
-    );
+          try {
+            fs.unlinkSync(
+              destination
+            );
+          } catch {}
 
-    request.setTimeout(
-      120000,
-      () => {
-        request.destroy(
-          new Error(
-            'Download timed out'
-          )
-        );
-      }
-    );
-
-    request.on('error', (error) => {
-      file.destroy();
-
-      try {
-        fs.unlinkSync(destination);
-      } catch {}
-
-      reject(error);
-    });
-  });
+          reject(error);
+        }
+      );
+    }
+  );
 }
 
 /* =========================================================
@@ -379,12 +773,15 @@ function getReelUrl(item) {
     item.url,
     item.webUrl,
     item.postUrl,
+
     item.shortcode
       ? `https://www.instagram.com/reel/${item.shortcode}/`
       : null,
+
     item.code
       ? `https://www.instagram.com/reel/${item.code}/`
       : null,
+
     item.permalink
   );
 }
@@ -392,7 +789,8 @@ function getReelUrl(item) {
 function getVideoUrl(item) {
   const videoObject =
     item.video &&
-    typeof item.video === 'object'
+    typeof item.video ===
+      'object'
       ? item.video
       : null;
 
@@ -408,7 +806,8 @@ function getVideoUrl(item) {
     videoObject?.videoUrl,
     videoObject?.downloadUrl,
 
-    typeof item.video === 'string'
+    typeof item.video ===
+      'string'
       ? item.video
       : null,
 
@@ -438,7 +837,10 @@ function getThumbnail(item) {
   );
 }
 
-function getUsername(item, fallback) {
+function getUsername(
+  item,
+  fallback
+) {
   return normalizeUsername(
     firstNonEmpty(
       item.username,
@@ -471,10 +873,13 @@ function getShortcode(item) {
 }
 
 /* =========================================================
-   APIFY
+   APIFY - ONE HISTORICAL WINDOW
 ========================================================= */
 
-async function runApifyProfile(username) {
+async function runApifyHistoricalWindow(
+  username,
+  window
+) {
   if (!APIFY_TOKEN) {
     throw new Error(
       'APIFY_TOKEN is not configured on Render.'
@@ -482,7 +887,9 @@ async function runApifyProfile(username) {
   }
 
   const normalizedUsername =
-    normalizeUsername(username);
+    normalizeUsername(
+      username
+    );
 
   if (!normalizedUsername) {
     throw new Error(
@@ -490,16 +897,59 @@ async function runApifyProfile(username) {
     );
   }
 
+  /*
+   * IMPORTANT:
+   *
+   * The new Actor uses:
+   *
+   * usernames
+   * maxReels
+   * onlyPostsNewerThan
+   * onlyPostsOlderThan
+   * sortBy
+   */
   const input = {
-    instagramUsernames: [
+    maxReels:
+      HISTORICAL_REELS_PER_WINDOW,
+
+    withDetails:
+      true,
+
+    usernames: [
       normalizedUsername
     ],
-    postsPerProfile:
-      APIFY_POSTS_PER_PROFILE
+
+    skipPinnedPosts:
+      false,
+
+    skipTrialReels:
+      false,
+
+    sortBy:
+      'recent',
+
+    withAiSentiment:
+      false,
+
+    withAiTopics:
+      false,
+
+    onlyPostsNewerThan:
+      window.newer,
+
+    onlyPostsOlderThan:
+      window.older
   };
 
   console.log(
-    `Starting Apify for @${normalizedUsername}, postsPerProfile=${APIFY_POSTS_PER_PROFILE}`
+    `Starting historical Apify window for @${normalizedUsername}: ${window.newer} -> ${window.older}`
+  );
+
+  console.log(
+    'Apify input:',
+    JSON.stringify(
+      input
+    )
   );
 
   const startUrl =
@@ -511,18 +961,26 @@ async function runApifyProfile(username) {
     )}`;
 
   const startResponse =
-    await requestJson(startUrl, {
-      method: 'POST',
+    await requestJson(
+      startUrl,
+      {
+        method:
+          'POST',
 
-      headers: {
-        'Content-Type':
-          'application/json'
-      },
+        headers: {
+          'Content-Type':
+            'application/json'
+        },
 
-      body: JSON.stringify(input),
+        body:
+          JSON.stringify(
+            input
+          ),
 
-      timeout: 60000
-    });
+        timeout:
+          60000
+      }
+    );
 
   const runDataFromStart =
     startResponse?.data ||
@@ -538,18 +996,22 @@ async function runApifyProfile(username) {
   }
 
   console.log(
-    `Apify run started: ${runId}`
+    `Apify historical run started: ${runId}`
   );
 
-  const MAX_ATTEMPTS = 120;
-  const POLL_INTERVAL_MS = 10000;
+  const MAX_ATTEMPTS =
+    120;
+
+  const POLL_INTERVAL_MS =
+    10000;
 
   let runData =
     runDataFromStart;
 
   for (
     let attempt = 1;
-    attempt <= MAX_ATTEMPTS;
+    attempt <=
+      MAX_ATTEMPTS;
     attempt++
   ) {
     await new Promise(
@@ -572,7 +1034,8 @@ async function runApifyProfile(username) {
       await requestJson(
         statusUrl,
         {
-          timeout: 30000
+          timeout:
+            30000
         }
       );
 
@@ -596,10 +1059,12 @@ async function runApifyProfile(username) {
         : null;
 
     console.log(
-      `Apify status ${attempt}/${MAX_ATTEMPTS}: ${status}` +
-      (duration !== null
-        ? ` (${duration}s)`
-        : '')
+      `Apify historical status ${attempt}/${MAX_ATTEMPTS}: ${status}` +
+      (
+        duration !== null
+          ? ` (${duration}s)`
+          : ''
+      )
     );
 
     if (
@@ -608,7 +1073,9 @@ async function runApifyProfile(username) {
         'FAILED',
         'ABORTED',
         'TIMED-OUT'
-      ].includes(status)
+      ].includes(
+        status
+      )
     ) {
       break;
     }
@@ -621,12 +1088,14 @@ async function runApifyProfile(username) {
   }
 
   console.log(
-    `Apify final status: ${runData.status}`
+    `Apify historical final status: ${runData.status}`
   );
 
   if (
-    runData.status === 'RUNNING' ||
-    runData.status === 'READY'
+    runData.status ===
+      'RUNNING' ||
+    runData.status ===
+      'READY'
   ) {
     throw new Error(
       `Apify run is still ${runData.status} after 20 minutes. Run ID: ${runId}`
@@ -634,7 +1103,8 @@ async function runApifyProfile(username) {
   }
 
   if (
-    runData.status !== 'SUCCEEDED'
+    runData.status !==
+    'SUCCEEDED'
   ) {
     throw new Error(
       `Apify run ended with status: ${runData.status}. Run ID: ${runId}`
@@ -651,7 +1121,7 @@ async function runApifyProfile(username) {
   }
 
   console.log(
-    `Apify dataset: ${datasetId}`
+    `Apify historical dataset: ${datasetId}`
   );
 
   const datasetUrl =
@@ -667,7 +1137,8 @@ async function runApifyProfile(username) {
     await requestJson(
       datasetUrl,
       {
-        timeout: 120000
+        timeout:
+          120000
       }
     );
 
@@ -678,26 +1149,117 @@ async function runApifyProfile(username) {
   }
 
   console.log(
-    `Apify returned ${items.length} items for @${normalizedUsername}`
+    `Apify returned ${items.length} items for @${normalizedUsername} in ${window.newer} -> ${window.older}`
   );
 
-  if (items.length > 0) {
+  if (
+    items.length > 0
+  ) {
     console.log(
-      'First Apify item keys:',
-      Object.keys(items[0])
+      'First new Actor item keys:',
+      Object.keys(
+        items[0]
+      )
     );
 
     console.log(
-      'First Apify item sample:',
+      'First new Actor item sample:',
       JSON.stringify(
         items[0],
         null,
         2
-      ).slice(0, 5000)
+      ).slice(
+        0,
+        5000
+      )
     );
   }
 
   return items;
+}
+
+/* =========================================================
+   APIFY - HISTORICAL SYNC
+========================================================= */
+
+async function runHistoricalSync(
+  username
+) {
+  const windows =
+    createHistoricalWindows();
+
+  console.log(
+    '=========================================='
+  );
+
+  console.log(
+    `Starting historical sync for @${username}`
+  );
+
+  console.log(
+    'Historical windows:',
+    JSON.stringify(
+      windows,
+      null,
+      2
+    )
+  );
+
+  console.log(
+    '=========================================='
+  );
+
+  const allItems = [];
+
+  /*
+   * Run sequentially.
+   *
+   * This is intentional:
+   * we do NOT start 4 Apify runs simultaneously.
+   */
+  for (
+    let i = 0;
+    i <
+      windows.length;
+    i++
+  ) {
+    const window =
+      windows[i];
+
+    try {
+      const items =
+        await runApifyHistoricalWindow(
+          username,
+          window
+        );
+
+      allItems.push(
+        ...items
+      );
+    } catch (error) {
+      console.error(
+        `Historical window ${i + 1} failed:`,
+        error.message
+      );
+    }
+  }
+
+  console.log(
+    `Historical sync collected ${allItems.length} raw items`
+  );
+
+  /*
+   * Shuffle all returned items.
+   *
+   * This prevents the first window from always
+   * occupying the first positions.
+   */
+  allItems.sort(
+    () =>
+      Math.random() - 0.5
+  );
+
+  return allItems;
 }
 
 /* =========================================================
@@ -717,11 +1279,13 @@ async function extractFrames(
   fs.mkdirSync(
     framesDir,
     {
-      recursive: true
+      recursive:
+        true
     }
   );
 
-  let duration = null;
+  let duration =
+    null;
 
   try {
     const result =
@@ -737,22 +1301,27 @@ async function extractFrames(
           videoPath
         ],
         {
-          timeout: 30000
+          timeout:
+            30000
         }
       );
 
     const parsed =
       Number(
         String(
-          result.stdout || ''
+          result.stdout ||
+            ''
         ).trim()
       );
 
     if (
-      Number.isFinite(parsed) &&
+      Number.isFinite(
+        parsed
+      ) &&
       parsed > 0
     ) {
-      duration = parsed;
+      duration =
+        parsed;
     }
   } catch (error) {
     console.warn(
@@ -773,14 +1342,16 @@ async function extractFrames(
 
     for (
       let i = 0;
-      i < percentages.length;
+      i <
+        percentages.length;
       i++
     ) {
       const timestamp =
         Math.max(
           0,
           Math.min(
-            duration - 0.1,
+            duration -
+              0.1,
             duration *
               percentages[i]
           )
@@ -798,7 +1369,9 @@ async function extractFrames(
           [
             '-y',
             '-ss',
-            String(timestamp),
+            String(
+              timestamp
+            ),
             '-i',
             videoPath,
             '-frames:v',
@@ -810,12 +1383,15 @@ async function extractFrames(
             output
           ],
           {
-            timeout: 30000
+            timeout:
+              30000
           }
         );
 
         if (
-          fs.existsSync(output)
+          fs.existsSync(
+            output
+          )
         ) {
           framePaths.push(
             output
@@ -831,7 +1407,8 @@ async function extractFrames(
   }
 
   if (
-    framePaths.length < 2
+    framePaths.length <
+    2
   ) {
     const fallback =
       path.join(
@@ -855,12 +1432,15 @@ async function extractFrames(
           fallback
         ],
         {
-          timeout: 30000
+          timeout:
+            30000
         }
       );
 
       if (
-        fs.existsSync(fallback)
+        fs.existsSync(
+          fallback
+        )
       ) {
         framePaths.push(
           fallback
@@ -881,7 +1461,9 @@ async function extractFrames(
    IMAGE -> DATA URL
 ========================================================= */
 
-function imageToDataUrl(filePath) {
+function imageToDataUrl(
+  filePath
+) {
   const buffer =
     fs.readFileSync(
       filePath
@@ -889,7 +1471,9 @@ function imageToDataUrl(filePath) {
 
   return (
     'data:image/jpeg;base64,' +
-    buffer.toString('base64')
+    buffer.toString(
+      'base64'
+    )
   );
 }
 
@@ -930,8 +1514,12 @@ async function analyzeVideoWithAI(
 
     const imageParts =
       frames.map(
-        (framePath) => ({
-          type: 'image_url',
+        (
+          framePath
+        ) => ({
+          type:
+            'image_url',
+
           image_url: {
             url:
               imageToDataUrl(
@@ -989,7 +1577,8 @@ ${caption || ''}
       await requestJson(
         'https://openrouter.ai/api/v1/chat/completions',
         {
-          method: 'POST',
+          method:
+            'POST',
 
           headers: {
             'Content-Type':
@@ -1005,36 +1594,45 @@ ${caption || ''}
               'Clipper'
           },
 
-          body: JSON.stringify({
-            model:
-              OPENROUTER_MODEL,
+          body:
+            JSON.stringify({
+              model:
+                OPENROUTER_MODEL,
 
-            messages: [
-              {
-                role: 'user',
+              messages: [
+                {
+                  role:
+                    'user',
 
-                content: [
-                  {
-                    type: 'text',
-                    text: prompt
-                  },
-                  ...imageParts
-                ]
+                  content: [
+                    {
+                      type:
+                        'text',
+
+                      text:
+                        prompt
+                    },
+
+                    ...imageParts
+                  ]
+                }
+              ],
+
+              response_format: {
+                type:
+                  'json_object'
               }
-            ],
+            }),
 
-            response_format: {
-              type: 'json_object'
-            }
-          }),
-
-          timeout: 120000
+          timeout:
+            120000
         }
       );
 
     const content =
       response?.choices?.[0]
-        ?.message?.content;
+        ?.message
+        ?.content;
 
     if (!content) {
       throw new Error(
@@ -1073,8 +1671,10 @@ ${caption || ''}
       fs.rmSync(
         workDir,
         {
-          recursive: true,
-          force: true
+          recursive:
+            true,
+          force:
+            true
         }
       );
     } catch {}
@@ -1089,12 +1689,26 @@ app.get(
   '/api/health',
   (req, res) => {
     res.json({
-      ok: true,
-      version: VERSION,
-      model: OPENROUTER_MODEL,
-      apifyPostsPerProfile:
-        APIFY_POSTS_PER_PROFILE,
-      time: nowIso()
+      ok:
+        true,
+
+      version:
+        VERSION,
+
+      model:
+        OPENROUTER_MODEL,
+
+      apifyActor:
+        APIFY_ACTOR,
+
+      historicalReelsPerWindow:
+        HISTORICAL_REELS_PER_WINDOW,
+
+      historicalWindows:
+        HISTORICAL_WINDOWS,
+
+      time:
+        nowIso()
     });
   }
 );
@@ -1103,15 +1717,12 @@ app.get(
    ACCOUNTS
 ========================================================= */
 
-/*
- * IMPORTANT:
- * Frontend expects a plain array here.
- */
-
 app.get(
   '/api/accounts',
   (req, res) => {
-    res.json(db.accounts);
+    res.json(
+      db.accounts
+    );
   }
 );
 
@@ -1125,7 +1736,9 @@ app.post(
         );
 
       if (!username) {
-        return res.status(400).json({
+        return res.status(
+          400
+        ).json({
           error:
             'Instagram username is required.'
         });
@@ -1133,7 +1746,9 @@ app.post(
 
       const existing =
         db.accounts.find(
-          (account) =>
+          (
+            account
+          ) =>
             account.username ===
             username
         );
@@ -1145,10 +1760,16 @@ app.post(
       }
 
       const account = {
-        id: id('acc_'),
+        id:
+          id('acc_'),
+
         username,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
+
+        createdAt:
+          nowIso(),
+
+        updatedAt:
+          nowIso()
       };
 
       db.accounts.push(
@@ -1157,7 +1778,9 @@ app.post(
 
       saveDb(db);
 
-      res.status(201).json(
+      res.status(
+        201
+      ).json(
         account
       );
     } catch (error) {
@@ -1166,7 +1789,9 @@ app.post(
         error
       );
 
-      res.status(500).json({
+      res.status(
+        500
+      ).json({
         error:
           error.message
       });
@@ -1183,21 +1808,27 @@ app.delete(
 
       db.accounts =
         db.accounts.filter(
-          (account) =>
+          (
+            account
+          ) =>
             account.id !==
             accountId
         );
 
       db.reels =
         db.reels.filter(
-          (reel) =>
+          (
+            reel
+          ) =>
             reel.accountId !==
             accountId
         );
 
       db.batches =
         db.batches.filter(
-          (batch) =>
+          (
+            batch
+          ) =>
             batch.accountId !==
             accountId
         );
@@ -1205,7 +1836,8 @@ app.delete(
       saveDb(db);
 
       res.json({
-        ok: true
+        ok:
+          true
       });
     } catch (error) {
       console.error(
@@ -1213,7 +1845,9 @@ app.delete(
         error
       );
 
-      res.status(500).json({
+      res.status(
+        500
+      ).json({
         error:
           error.message
       });
@@ -1222,52 +1856,79 @@ app.delete(
 );
 
 /* =========================================================
-   SYNC INSTAGRAM
+   SYNC INSTAGRAM - HISTORICAL
 ========================================================= */
 
 app.post(
   '/api/accounts/:id/sync',
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     try {
       const account =
         db.accounts.find(
-          (item) =>
+          (
+            item
+          ) =>
             item.id ===
             req.params.id
         );
 
       if (!account) {
-        return res.status(404).json({
+        return res.status(
+          404
+        ).json({
           error:
             'Instagram account not found.'
         });
       }
 
       console.log(
-        `Starting Instagram sync for @${account.username}`
+        `Starting HISTORICAL Instagram sync for @${account.username}`
       );
 
+      /*
+       * Four small Apify runs.
+       */
       const items =
-        await runApifyProfile(
+        await runHistoricalSync(
           account.username
         );
 
       let added = 0;
       let updated = 0;
+      let duplicates = 0;
 
-      for (const item of items) {
+      /*
+       * Track IDs/URLs during this Sync too,
+       * so duplicate results from different
+       * historical windows are not stored twice.
+       */
+      const syncSeen =
+        new Set();
+
+      for (
+        const item of items
+      ) {
         const reelUrl =
-          getReelUrl(item);
+          getReelUrl(
+            item
+          );
 
         if (!reelUrl) {
           continue;
         }
 
         const videoUrl =
-          getVideoUrl(item);
+          getVideoUrl(
+            item
+          );
 
         const shortcode =
-          getShortcode(item);
+          getShortcode(
+            item
+          );
 
         const externalId =
           firstNonEmpty(
@@ -1277,14 +1938,51 @@ app.post(
             reelUrl
           );
 
+        const syncKey =
+          String(
+            externalId ||
+              reelUrl
+          ).toLowerCase();
+
+        /*
+         * Duplicate within the current Sync.
+         */
+        if (
+          syncSeen.has(
+            syncKey
+          )
+        ) {
+          duplicates++;
+          continue;
+        }
+
+        syncSeen.add(
+          syncKey
+        );
+
+        /*
+         * Duplicate already stored in Clipper.
+         *
+         * We compare both externalId and URL.
+         */
         const existing =
           db.reels.find(
-            (reel) =>
+            (
+              reel
+            ) =>
               reel.accountId ===
                 account.id &&
               (
-                reel.externalId ===
-                  externalId ||
+                (
+                  reel.externalId &&
+                  externalId &&
+                  String(
+                    reel.externalId
+                  ) ===
+                    String(
+                      externalId
+                    )
+                ) ||
                 reel.url ===
                   reelUrl
               )
@@ -1310,13 +2008,19 @@ app.post(
           videoUrl,
 
           thumbnailUrl:
-            getThumbnail(item),
+            getThumbnail(
+              item
+            ),
 
           caption:
-            getCaption(item),
+            getCaption(
+              item
+            ),
 
           publishedAt:
-            getTimestamp(item),
+            getTimestamp(
+              item
+            ),
 
           updatedAt:
             nowIso(),
@@ -1326,6 +2030,13 @@ app.post(
         };
 
         if (existing) {
+          /*
+           * IMPORTANT:
+           * Do not overwrite an existing analysis,
+           * selected hook or render.
+           *
+           * Only update Instagram source fields.
+           */
           Object.assign(
             existing,
             reelData
@@ -1361,12 +2072,22 @@ app.post(
 
       saveDb(db);
 
+      const accountReels =
+        db.reels.filter(
+          (
+            reel
+          ) =>
+            reel.accountId ===
+            account.id
+        );
+
       console.log(
-        `Instagram sync complete for @${account.username}: added=${added}, updated=${updated}, total=${items.length}`
+        `Historical Instagram sync complete for @${account.username}: added=${added}, updated=${updated}, duplicates=${duplicates}, raw=${items.length}, total=${accountReels.length}`
       );
 
       res.json({
-        ok: true,
+        ok:
+          true,
 
         account,
 
@@ -1374,23 +2095,26 @@ app.post(
 
         updated,
 
+        duplicates,
+
         total:
           items.length,
 
+        syncWindows:
+          HISTORICAL_WINDOWS,
+
         reels:
-          db.reels.filter(
-            (reel) =>
-              reel.accountId ===
-              account.id
-          )
+          accountReels
       });
     } catch (error) {
       console.error(
-        'Instagram sync error:',
+        'Historical Instagram sync error:',
         error
       );
 
-      res.status(500).json({
+      res.status(
+        500
+      ).json({
         error:
           error.message ||
           'Instagram sync failed.'
@@ -1403,20 +2127,13 @@ app.post(
    REELS
 ========================================================= */
 
-/*
- * IMPORTANT:
- * Frontend calls:
- * GET /api/reels?limit=1000
- *
- * Frontend expects a plain array.
- */
-
 app.get(
   '/api/reels',
   (req, res) => {
     const requestedLimit =
       Number(
-        req.query.limit || 1000
+        req.query.limit ||
+          1000
       );
 
     const limit =
@@ -1430,9 +2147,14 @@ app.get(
       );
 
     const reels =
-      [...db.reels]
+      [
+        ...db.reels
+      ]
         .sort(
-          (a, b) =>
+          (
+            a,
+            b
+          ) =>
             new Date(
               b.publishedAt ||
                 b.createdAt ||
@@ -1449,7 +2171,9 @@ app.get(
           limit
         );
 
-    res.json(reels);
+    res.json(
+      reels
+    );
   }
 );
 
@@ -1459,12 +2183,17 @@ app.get(
     const reels =
       db.reels
         .filter(
-          (reel) =>
+          (
+            reel
+          ) =>
             reel.accountId ===
             req.params.id
         )
         .sort(
-          (a, b) =>
+          (
+            a,
+            b
+          ) =>
             new Date(
               b.publishedAt ||
                 b.createdAt
@@ -1485,29 +2214,31 @@ app.get(
    BATCHES
 ========================================================= */
 
-/*
- * Frontend expects:
- * GET /api/batches
- *
- * and expects a plain array.
- */
-
 app.get(
   '/api/batches',
   (req, res) => {
     const batches =
-      [...db.batches]
+      [
+        ...db.batches
+      ]
         .sort(
-          (a, b) =>
+          (
+            a,
+            b
+          ) =>
             new Date(
-              b.createdAt || 0
+              b.createdAt ||
+                0
             ) -
             new Date(
-              a.createdAt || 0
+              a.createdAt ||
+                0
             )
         );
 
-    res.json(batches);
+    res.json(
+      batches
+    );
   }
 );
 
@@ -1519,7 +2250,8 @@ app.get(
 
     const requestedLimit =
       Number(
-        req.query.limit || 10
+        req.query.limit ||
+          10
       );
 
     const limit =
@@ -1534,7 +2266,9 @@ app.get(
 
     let reels =
       db.reels.filter(
-        (reel) =>
+        (
+          reel
+        ) =>
           !accountId ||
           reel.accountId ===
             accountId
@@ -1543,7 +2277,8 @@ app.get(
     reels =
       reels.sort(
         () =>
-          Math.random() - 0.5
+          Math.random() -
+          0.5
       );
 
     res.json({
@@ -1562,23 +2297,32 @@ app.get(
 
 app.post(
   '/api/reels/:id/analyze',
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     const reel =
       db.reels.find(
-        (item) =>
+        (
+          item
+        ) =>
           item.id ===
           req.params.id
       );
 
     if (!reel) {
-      return res.status(404).json({
+      return res.status(
+        404
+      ).json({
         error:
           'Reel not found.'
       });
     }
 
     if (!reel.videoUrl) {
-      return res.status(400).json({
+      return res.status(
+        400
+      ).json({
         error:
           'This Reel does not have a downloadable video URL.'
       });
@@ -1627,7 +2371,9 @@ app.post(
       saveDb(db);
 
       res.json({
-        ok: true,
+        ok:
+          true,
+
         reel
       });
     } catch (error) {
@@ -1636,7 +2382,9 @@ app.post(
         error
       );
 
-      res.status(500).json({
+      res.status(
+        500
+      ).json({
         error:
           error.message ||
           'Reel analysis failed.'
@@ -1646,8 +2394,10 @@ app.post(
         fs.rmSync(
           workDir,
           {
-            recursive: true,
-            force: true
+            recursive:
+              true,
+            force:
+              true
           }
         );
       } catch {}
@@ -1661,16 +2411,23 @@ app.post(
 
 app.post(
   '/api/reels/:id/hook',
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     const reel =
       db.reels.find(
-        (item) =>
+        (
+          item
+        ) =>
           item.id ===
           req.params.id
       );
 
     if (!reel) {
-      return res.status(404).json({
+      return res.status(
+        404
+      ).json({
         error:
           'Reel not found.'
       });
@@ -1678,11 +2435,14 @@ app.post(
 
     const hook =
       String(
-        req.body?.hook || ''
+        req.body?.hook ||
+          ''
       ).trim();
 
     if (!hook) {
-      return res.status(400).json({
+      return res.status(
+        400
+      ).json({
         error:
           'Hook is required.'
       });
@@ -1697,7 +2457,9 @@ app.post(
     saveDb(db);
 
     res.json({
-      ok: true,
+      ok:
+        true,
+
       reel
     });
   }
@@ -1709,35 +2471,41 @@ app.post(
 
 app.post(
   '/api/jobs/:reelId/render',
-  async (req, res) => {
+  async (
+    req,
+    res
+  ) => {
     const reel =
       db.reels.find(
-        (item) =>
+        (
+          item
+        ) =>
           item.id ===
           req.params.reelId
       );
 
     if (!reel) {
-      return res.status(404).json({
+      return res.status(
+        404
+      ).json({
         error:
           'Reel not found.'
       });
     }
 
     if (!reel.videoUrl) {
-      return res.status(400).json({
+      return res.status(
+        400
+      ).json({
         error:
           'Reel has no video URL.'
       });
     }
 
-    /*
-     * If frontend sends a hook directly,
-     * save it before rendering.
-     */
     const requestedHook =
       String(
-        req.body?.hook || ''
+        req.body?.hook ||
+          ''
       ).trim();
 
     if (requestedHook) {
@@ -1754,7 +2522,8 @@ app.post(
       id('job_');
 
     const job = {
-      id: jobId,
+      id:
+        jobId,
 
       reelId:
         reel.id,
@@ -1775,23 +2544,22 @@ app.post(
         null
     };
 
-    db.jobs.push(job);
+    db.jobs.push(
+      job
+    );
 
     saveDb(db);
 
-    /*
-     * Return immediately.
-     *
-     * Rendering continues in background.
-     */
-
     res.json({
-      ok: true,
+      ok:
+        true,
+
       job
     });
 
     (async () => {
-      let workDir = null;
+      let workDir =
+        null;
 
       try {
         job.status =
@@ -1836,11 +2604,10 @@ app.post(
           reel.analysis?.hook ||
           '';
 
-        /*
-         * Escape text for FFmpeg drawtext.
-         */
         const escapedHook =
-          String(hook)
+          String(
+            hook
+          )
             .replace(
               /\\/g,
               '\\\\'
@@ -1866,20 +2633,21 @@ app.post(
               '\\%'
             );
 
-        /*
-         * Vertical 1080x1920 Reel.
-         */
         const filter =
           [
             'scale=1080:1920:force_original_aspect_ratio=increase',
+
             'crop=1080:1920',
+
             'setsar=1',
 
             escapedHook
               ? `drawtext=text='${escapedHook}':fontcolor=white:fontsize=58:borderw=4:bordercolor=black:x=(w-text_w)/2:y=140:box=1:boxcolor=black@0.35:boxborderw=20`
               : null
           ]
-            .filter(Boolean)
+            .filter(
+              Boolean
+            )
             .join(',');
 
         console.log(
@@ -1890,22 +2658,31 @@ app.post(
           'ffmpeg',
           [
             '-y',
+
             '-i',
             sourcePath,
+
             '-vf',
             filter,
+
             '-c:v',
             'libx264',
+
             '-preset',
             'veryfast',
+
             '-crf',
             '23',
+
             '-c:a',
             'aac',
+
             '-b:a',
             '128k',
+
             '-movflags',
             '+faststart',
+
             outputPath
           ],
           {
@@ -1959,7 +2736,9 @@ app.post(
 
         const currentJob =
           db.jobs.find(
-            (item) =>
+            (
+              item
+            ) =>
               item.id ===
               jobId
           );
@@ -1997,7 +2776,8 @@ app.post(
               {
                 recursive:
                   true,
-                force: true
+                force:
+                  true
               }
             );
           } catch {}
@@ -2013,16 +2793,23 @@ app.post(
 
 app.get(
   '/api/jobs/:id',
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
     const job =
       db.jobs.find(
-        (item) =>
+        (
+          item
+        ) =>
           item.id ===
           req.params.id
       );
 
     if (!job) {
-      return res.status(404).json({
+      return res.status(
+        404
+      ).json({
         error:
           'Job not found.'
       });
@@ -2044,13 +2831,17 @@ function sendRenderedFile(
 ) {
   const job =
     db.jobs.find(
-      (item) =>
+      (
+        item
+      ) =>
         item.id ===
         req.params.id
     );
 
   if (!job) {
-    return res.status(404).send(
+    return res.status(
+      404
+    ).send(
       'Render job not found.'
     );
   }
@@ -2059,7 +2850,9 @@ function sendRenderedFile(
     job.status !==
     'completed'
   ) {
-    return res.status(409).send(
+    return res.status(
+      409
+    ).send(
       'Render is not completed yet.'
     );
   }
@@ -2075,7 +2868,9 @@ function sendRenderedFile(
       filePath
     )
   ) {
-    return res.status(404).send(
+    return res.status(
+      404
+    ).send(
       'Rendered file no longer exists.'
     );
   }
@@ -2096,9 +2891,6 @@ app.get(
 
 /*
  * Frontend compatibility endpoint.
- *
- * The current frontend uses /file,
- * while the backend historically used /download.
  */
 app.get(
   '/api/jobs/:id/file',
@@ -2110,10 +2902,16 @@ app.get(
 ========================================================= */
 
 app.use(
-  (req, res) => {
-    res.status(404).json({
+  (
+    req,
+    res
+  ) => {
+    res.status(
+      404
+    ).json({
       error:
         'Endpoint not found.',
+
       path:
         req.path
     });
@@ -2139,10 +2937,14 @@ app.use(
     if (
       res.headersSent
     ) {
-      return next(error);
+      return next(
+        error
+      );
     }
 
-    res.status(500).json({
+    res.status(
+      500
+    ).json({
       error:
         error.message ||
         'Internal server error.'
@@ -2167,7 +2969,11 @@ app.listen(
     );
 
     console.log(
-      `Apify posts per profile: ${APIFY_POSTS_PER_PROFILE}`
+      `Historical Reel batch size: ${HISTORICAL_REELS_PER_WINDOW}`
+    );
+
+    console.log(
+      `Historical windows: ${HISTORICAL_WINDOWS}`
     );
 
     console.log(
