@@ -20,27 +20,53 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '1.9';
+const VERSION = '2.0';
+
+/*
+ * ========================================
+ * APIFY
+ * ========================================
+ *
+ * V2.0 uses cursor-based pagination.
+ *
+ * Actor:
+ * seemuapps~instagram-posts-scraper
+ *
+ * Mode:
+ * clips = Reels Only
+ *
+ * Pagination:
+ * NEXT_PAGE_ID -> pageId
+ */
 
 const APIFY_TOKEN =
   process.env.APIFY_TOKEN || '';
 
-const APIFY_ACTOR =
-  process.env.APIFY_ACTOR ||
-  'scrapers_lat~instagram-reels-scraper';
-
 /*
  * IMPORTANT:
- * The new scraper supports up to 10 reels per run
- * on the free Apify plan.
+ * We intentionally use the new cursor-based
+ * Actor here.
  *
- * Keep this small to avoid excessive Apify usage.
+ * This does NOT use the old
+ * scrapers_lat actor.
+ */
+const APIFY_ACTOR =
+  'seemuapps~instagram-posts-scraper';
+
+/*
+ * We fetch 20 Reels per Sync.
+ *
+ * This gives us a useful batch while keeping
+ * Apify usage controlled.
  */
 const APIFY_BATCH_SIZE = Math.min(
-  Number(
-    process.env.APIFY_BATCH_SIZE || 10
+  Math.max(
+    Number(
+      process.env.APIFY_BATCH_SIZE || 20
+    ),
+    1
   ),
-  10
+  30
 );
 
 const OPENROUTER_API_KEY =
@@ -71,6 +97,12 @@ fs.mkdirSync(
     recursive: true
   }
 );
+
+/*
+ * ========================================
+ * DATABASE
+ * ========================================
+ */
 
 function createEmptyDb() {
   return {
@@ -221,6 +253,12 @@ function safeJsonParse(value) {
   }
 }
 
+/*
+ * ========================================
+ * HTTP HELPERS
+ * ========================================
+ */
+
 function requestJson(
   url,
   options = {}
@@ -299,7 +337,7 @@ function requestJson(
                     new Error(
                       `HTTP ${statusCode}: ${body.slice(
                         0,
-                        2000
+                        3000
                       )}`
                     )
                   );
@@ -318,7 +356,7 @@ function requestJson(
                     new Error(
                       `Invalid JSON response: ${body.slice(
                         0,
-                        2000
+                        3000
                       )}`
                     )
                   );
@@ -497,20 +535,22 @@ function downloadFile(
 }
 
 /*
- * ----------------------------------------
- * INSTAGRAM / APIFY HELPERS
- * ----------------------------------------
+ * ========================================
+ * INSTAGRAM / REEL HELPERS
+ * ========================================
  */
 
 function getReelUrl(item) {
   return firstNonEmpty(
+    item.postUrl,
+
     item.url,
 
     item.webUrl,
 
-    item.postUrl,
-
     item.permalink,
+
+    item.instagram_url,
 
     item.shortcode
       ? `https://www.instagram.com/reel/${item.shortcode}/`
@@ -596,9 +636,13 @@ function getUsername(
 ) {
   return normalizeUsername(
     firstNonEmpty(
+      item.authorUsername,
+
       item.username,
 
       item.ownerUsername,
+
+      item.author?.username,
 
       item.owner?.username,
 
@@ -635,10 +679,26 @@ function getShortcode(item) {
   );
 }
 
+function getExternalId(item) {
+  return firstNonEmpty(
+    item.postId,
+
+    item.id,
+
+    item.pk,
+
+    getShortcode(item),
+
+    getReelUrl(item)
+  );
+}
+
 /*
- * Get the oldest reel already stored
- * for an account.
+ * ========================================
+ * ACCOUNT HELPERS
+ * ========================================
  */
+
 function getOldestStoredReel(
   accountId
 ) {
@@ -667,10 +727,6 @@ function getOldestStoredReel(
   return reels[0];
 }
 
-/*
- * Get the newest reel already stored
- * for an account.
- */
 function getNewestStoredReel(
   accountId
 ) {
@@ -700,10 +756,112 @@ function getNewestStoredReel(
 }
 
 /*
- * ----------------------------------------
- * APIFY
- * ----------------------------------------
+ * ========================================
+ * APIFY CURSOR PAGINATION
+ * ========================================
  */
+
+async function getApifyNextPageId(
+  keyValueStoreId
+) {
+  if (!keyValueStoreId) {
+    console.warn(
+      'Apify did not return defaultKeyValueStoreId.'
+    );
+
+    return null;
+  }
+
+  const url =
+    `https://api.apify.com/v2/key-value-stores/${encodeURIComponent(
+      keyValueStoreId
+    )}/records/NEXT_PAGE_ID` +
+    `?token=${encodeURIComponent(
+      APIFY_TOKEN
+    )}`;
+
+  try {
+    const value =
+      await requestJson(
+        url,
+        {
+          timeout:
+            30000
+        }
+      );
+
+    /*
+     * The record may be returned as a
+     * JSON string, object, null, etc.
+     */
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return null;
+    }
+
+    if (
+      typeof value ===
+      'string'
+    ) {
+      const trimmed =
+        value.trim();
+
+      if (
+        !trimmed ||
+        trimmed ===
+          'null'
+      ) {
+        return null;
+      }
+
+      return trimmed;
+    }
+
+    if (
+      typeof value ===
+      'object'
+    ) {
+      if (
+        typeof value.value ===
+        'string'
+      ) {
+        return value.value;
+      }
+
+      if (
+        typeof value.pageId ===
+        'string'
+      ) {
+        return value.pageId;
+      }
+
+      return null;
+    }
+
+    return String(
+      value
+    );
+  } catch (error) {
+    /*
+     * If NEXT_PAGE_ID does not exist,
+     * treat it as exhausted.
+     */
+    if (
+      String(
+        error.message ||
+          ''
+      ).includes(
+        'HTTP 404'
+      )
+    ) {
+      return null;
+    }
+
+    throw error;
+  }
+}
 
 async function runApify(
   username,
@@ -726,57 +884,41 @@ async function runApify(
     );
   }
 
-  const input = {
-    maxReels:
-      Math.min(
-        Number(
-          options.maxReels ||
-            APIFY_BATCH_SIZE
-        ),
-        10
-      ),
-
-    withDetails:
-      true,
-
-    usernames: [
-      normalizedUsername
-    ],
-
-    skipPinnedPosts:
-      false,
-
-    skipTrialReels:
-      false,
-
-    sortBy:
-      options.sortBy ||
-      'recent',
-
-    withAiSentiment:
-      false,
-
-    withAiTopics:
-      false
-  };
-
   /*
    * IMPORTANT:
-   * Only add the older cutoff when we
-   * actually have one.
+   *
+   * This is the exact architecture of
+   * the new Actor:
+   *
+   * username
+   * mode = clips
+   * maxPosts
+   * pageId = NEXT_PAGE_ID
    */
-  if (
-    options.onlyPostsOlderThan
-  ) {
-    input.onlyPostsOlderThan =
-      options.onlyPostsOlderThan;
-  }
+  const input = {
+    username:
+      normalizedUsername,
+
+    mode:
+      'clips',
+
+    maxPosts:
+      Math.min(
+        Number(
+          options.maxPosts ||
+            APIFY_BATCH_SIZE
+        ),
+        30
+      )
+  };
 
   if (
-    options.onlyPostsNewerThan
+    options.pageId
   ) {
-    input.onlyPostsNewerThan =
-      options.onlyPostsNewerThan;
+    input.pageId =
+      String(
+        options.pageId
+      );
   }
 
   console.log(
@@ -784,12 +926,18 @@ async function runApify(
   );
 
   console.log(
-    `Starting Apify for @${normalizedUsername}`
+    `Starting cursor-based Apify sync for @${normalizedUsername}`
+  );
+
+  console.log(
+    `Actor: ${APIFY_ACTOR}`
   );
 
   console.log(
     'Apify input:',
-    JSON.stringify(input)
+    JSON.stringify(
+      input
+    )
   );
 
   const startUrl =
@@ -949,6 +1097,9 @@ async function runApify(
   const datasetId =
     runData.defaultDatasetId;
 
+  const keyValueStoreId =
+    runData.defaultKeyValueStoreId;
+
   if (!datasetId) {
     throw new Error(
       'Apify run completed but no dataset was returned.'
@@ -957,6 +1108,13 @@ async function runApify(
 
   console.log(
     `Apify dataset: ${datasetId}`
+  );
+
+  console.log(
+    `Apify key-value store: ${
+      keyValueStoreId ||
+      'not returned'
+    }`
   );
 
   const datasetUrl =
@@ -983,8 +1141,27 @@ async function runApify(
     );
   }
 
+  /*
+   * Get the cursor AFTER the run has
+   * completed and the actor has written it.
+   */
+  const nextPageId =
+    await getApifyNextPageId(
+      keyValueStoreId
+    );
+
   console.log(
-    `Apify returned ${items.length} items for @${normalizedUsername}`
+    `Apify returned ${items.length} items.`
+  );
+
+  console.log(
+    `NEXT_PAGE_ID: ${
+      nextPageId
+        ? `${String(
+            nextPageId
+          ).slice(0, 30)}...`
+        : 'null'
+    }`
   );
 
   if (
@@ -1003,13 +1180,19 @@ async function runApify(
     );
   }
 
-  return items;
+  return {
+    items,
+    nextPageId,
+    runId,
+    datasetId,
+    keyValueStoreId
+  };
 }
 
 /*
- * ----------------------------------------
+ * ========================================
  * SAVE / UPSERT APIFY REELS
- * ----------------------------------------
+ * ========================================
  */
 
 function saveApifyItems(
@@ -1019,6 +1202,13 @@ function saveApifyItems(
   let added = 0;
   let updated = 0;
   let duplicates = 0;
+
+  /*
+   * Keep track of items seen inside the
+   * current Apify response as well.
+   */
+  const seenThisRun =
+    new Set();
 
   for (
     const item of items
@@ -1031,6 +1221,23 @@ function saveApifyItems(
     ) {
       console.warn(
         `Skipping Apify error record: ${item.error}`
+      );
+
+      continue;
+    }
+
+    /*
+     * The Actor supports both posts and
+     * Reels structurally. We requested
+     * clips mode, but verify anyway.
+     */
+    if (
+      item.productType &&
+      item.productType !==
+        'clips'
+    ) {
+      console.warn(
+        `Skipping non-Reel item: ${item.productType}`
       );
 
       continue;
@@ -1055,13 +1262,32 @@ function saveApifyItems(
 
     const externalId =
       String(
-        firstNonEmpty(
-          item.id,
-          item.pk,
-          shortcode,
-          reelUrl
+        getExternalId(
+          item
         )
       );
+
+    /*
+     * Deduplicate inside the same
+     * Apify response.
+     */
+    const runKey =
+      shortcode ||
+      externalId ||
+      reelUrl;
+
+    if (
+      seenThisRun.has(
+        runKey
+      )
+    ) {
+      duplicates++;
+      continue;
+    }
+
+    seenThisRun.add(
+      runKey
+    );
 
     const publishedAt =
       getTimestamp(item);
@@ -1072,10 +1298,19 @@ function saveApifyItems(
           reel.accountId ===
             account.id &&
           (
-            String(
-              reel.externalId
-            ) ===
-              externalId ||
+            (
+              reel.externalId &&
+              String(
+                reel.externalId
+              ) ===
+                externalId
+            ) ||
+            (
+              shortcode &&
+              reel.shortcode &&
+              reel.shortcode ===
+                shortcode
+            ) ||
             reel.url ===
               reelUrl
           )
@@ -1112,6 +1347,40 @@ function saveApifyItems(
 
       publishedAt,
 
+      /*
+       * Keep useful engagement data
+       * for future Clipper features.
+       */
+      likeCount:
+        firstNonEmpty(
+          item.likeCount,
+          item.likesCount
+        ),
+
+      commentCount:
+        firstNonEmpty(
+          item.commentCount,
+          item.commentsCount
+        ),
+
+      viewCount:
+        firstNonEmpty(
+          item.viewCount,
+          item.viewsCount
+        ),
+
+      playCount:
+        firstNonEmpty(
+          item.playCount,
+          item.playsCount
+        ),
+
+      duration:
+        firstNonEmpty(
+          item.videoDuration,
+          item.duration
+        ),
+
       updatedAt:
         nowIso(),
 
@@ -1121,13 +1390,35 @@ function saveApifyItems(
 
     if (existing) {
       /*
-       * Do not destroy existing AI analysis
-       * or selected hook when refreshing data.
+       * IMPORTANT:
+       * Never destroy existing AI analysis,
+       * selected hook or render.
        */
+      const existingAnalysis =
+        existing.analysis;
+
+      const existingSelectedHook =
+        existing.selectedHook;
+
+      const existingRender =
+        existing.render;
+
       Object.assign(
         existing,
         reelData
       );
+
+      existing.analysis =
+        existingAnalysis ||
+        null;
+
+      existing.selectedHook =
+        existingSelectedHook ||
+        null;
+
+      existing.render =
+        existingRender ||
+        null;
 
       updated++;
     } else {
@@ -1162,9 +1453,9 @@ function saveApifyItems(
 }
 
 /*
- * ----------------------------------------
+ * ========================================
  * HEALTH
- * ----------------------------------------
+ * ========================================
  */
 
 app.get(
@@ -1187,7 +1478,10 @@ app.get(
         APIFY_BATCH_SIZE,
 
       syncStrategy:
-        'progressive-history',
+        'cursor-pagination',
+
+      apifyMode:
+        'clips',
 
       time:
         nowIso()
@@ -1196,9 +1490,9 @@ app.get(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * ACCOUNTS
- * ----------------------------------------
+ * ========================================
  */
 
 app.get(
@@ -1251,7 +1545,22 @@ app.post(
           nowIso(),
 
         updatedAt:
-          nowIso()
+          nowIso(),
+
+        /*
+         * V2.0 pagination state.
+         */
+        apifyPageId:
+          null,
+
+        apifyExhausted:
+          false,
+
+        apifyLastRunId:
+          null,
+
+        apifyLastSyncAt:
+          null
       };
 
       db.accounts.push(
@@ -1332,22 +1641,29 @@ app.delete(
 );
 
 /*
- * ----------------------------------------
- * PROGRESSIVE INSTAGRAM SYNC
- * ----------------------------------------
+ * ========================================
+ * CURSOR-BASED INSTAGRAM SYNC
+ * ========================================
  *
- * Strategy:
+ * FIRST SYNC:
  *
- * First sync:
- *   -> get latest 10
+ *   pageId = null
+ *   -> newest page of Reels
+ *   -> save NEXT_PAGE_ID
  *
- * Later sync:
- *   -> find oldest stored reel
- *   -> ask Apify for reels older than it
- *   -> get next historical batch
+ * SECOND SYNC:
  *
- * This is much safer than running four
- * independent historical windows every time.
+ *   pageId = saved NEXT_PAGE_ID
+ *   -> next page
+ *   -> save new NEXT_PAGE_ID
+ *
+ * THIRD SYNC:
+ *
+ *   same again
+ *
+ * When NEXT_PAGE_ID = null:
+ *
+ *   -> profile history exhausted
  */
 
 app.post(
@@ -1373,92 +1689,167 @@ app.post(
           });
       }
 
+      /*
+       * Migration safety:
+       *
+       * Accounts created in V1.9 do not
+       * have these properties.
+       */
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          account,
+          'apifyPageId'
+        )
+      ) {
+        account.apifyPageId =
+          null;
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          account,
+          'apifyExhausted'
+        )
+      ) {
+        account.apifyExhausted =
+          false;
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          account,
+          'apifyLastRunId'
+        )
+      ) {
+        account.apifyLastRunId =
+          null;
+      }
+
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          account,
+          'apifyLastSyncAt'
+        )
+      ) {
+        account.apifyLastSyncAt =
+          null;
+      }
+
       console.log(
         '=========================================='
       );
 
       console.log(
-        `Starting progressive sync for @${account.username}`
+        `Starting V2.0 cursor sync for @${account.username}`
       );
 
-      const oldest =
-        getOldestStoredReel(
-          account.id
-        );
-
-      const newest =
-        getNewestStoredReel(
-          account.id
-        );
-
-      let items = [];
-
       /*
-       * FIRST SYNC
+       * If the profile was previously
+       * exhausted, don't waste an Apify run.
        */
-      if (!oldest) {
-        console.log(
-          'No stored reels found.'
-        );
+      if (
+        account.apifyExhausted &&
+        !req.body?.force
+      ) {
+        const existingReels =
+          db.reels
+            .filter(
+              (reel) =>
+                reel.accountId ===
+                account.id
+            )
+            .sort(
+              (a, b) =>
+                new Date(
+                  b.publishedAt ||
+                    b.createdAt ||
+                    0
+                ) -
+                new Date(
+                  a.publishedAt ||
+                    a.createdAt ||
+                    0
+                )
+            );
 
-        console.log(
-          `Fetching newest ${APIFY_BATCH_SIZE} reels.`
-        );
+        return res.json({
+          ok:
+            true,
 
-        items =
-          await runApify(
-            account.username,
-            {
-              maxReels:
-                APIFY_BATCH_SIZE,
+          mode:
+            'exhausted',
 
-              sortBy:
-                'recent'
-            }
-          );
+          account,
+
+          added:
+            0,
+
+          updated:
+            0,
+
+          duplicates:
+            0,
+
+          raw:
+            0,
+
+          total:
+            existingReels.length,
+
+          oldestStored:
+            existingReels.length
+              ? existingReels[
+                  existingReels.length -
+                    1
+                ].publishedAt
+              : null,
+
+          newestStored:
+            existingReels.length
+              ? existingReels[0]
+                  .publishedAt
+              : null,
+
+          message:
+            'Instagram history is already exhausted for this account.',
+
+          reels:
+            existingReels
+        });
       }
 
-      /*
-       * HISTORICAL SYNC
-       */
-      else {
-        console.log(
-          `Oldest stored reel: ${oldest.publishedAt}`
-        );
-
-        console.log(
-          `Newest stored reel: ${
-            newest?.publishedAt ||
-            'unknown'
-          }`
-        );
-
-        /*
-         * Use onlyPostsOlderThan.
-         *
-         * We intentionally do NOT use a second
-         * date boundary. The Actor then has the
-         * freedom to paginate backwards through
-         * the public reels listing.
-         */
-        items =
-          await runApify(
-            account.username,
-            {
-              maxReels:
-                APIFY_BATCH_SIZE,
-
-              sortBy:
-                'recent',
-
-              onlyPostsOlderThan:
-                oldest.publishedAt
-            }
-          );
-      }
+      const pageId =
+        account.apifyPageId ||
+        null;
 
       console.log(
-        `Sync received ${items.length} raw items.`
+        pageId
+          ? `Continuing from saved NEXT_PAGE_ID: ${String(
+              pageId
+            ).slice(
+              0,
+              40
+            )}...`
+          : 'No saved cursor. Starting from newest Reels.'
+      );
+
+      const apifyResult =
+        await runApify(
+          account.username,
+          {
+            maxPosts:
+              APIFY_BATCH_SIZE,
+
+            pageId
+          }
+        );
+
+      const items =
+        apifyResult.items ||
+        [];
+
+      console.log(
+        `V2.0 received ${items.length} raw Apify items.`
       );
 
       const result =
@@ -1466,6 +1857,24 @@ app.post(
           account,
           items
         );
+
+      /*
+       * Save the NEW cursor only after the
+       * dataset has been successfully processed.
+       */
+      account.apifyPageId =
+        apifyResult.nextPageId ||
+        null;
+
+      account.apifyExhausted =
+        !apifyResult.nextPageId;
+
+      account.apifyLastRunId =
+        apifyResult.runId ||
+        null;
+
+      account.apifyLastSyncAt =
+        nowIso();
 
       account.updatedAt =
         nowIso();
@@ -1493,8 +1902,20 @@ app.post(
               )
           );
 
+      const oldest =
+        getOldestStoredReel(
+          account.id
+        );
+
+      const newest =
+        getNewestStoredReel(
+          account.id
+        );
+
       console.log(
-        `Progressive sync complete for @${account.username}: added=${result.added}, updated=${result.updated}, raw=${items.length}, total=${accountReels.length}`
+        `V2.0 sync complete for @${account.username}: added=${result.added}, updated=${result.updated}, duplicates=${result.duplicates}, raw=${items.length}, total=${accountReels.length}, hasNext=${Boolean(
+          account.apifyPageId
+        )}`
       );
 
       res.json({
@@ -1502,8 +1923,8 @@ app.post(
           true,
 
         mode:
-          oldest
-            ? 'historical'
+          pageId
+            ? 'next-page'
             : 'initial',
 
         account,
@@ -1523,26 +1944,33 @@ app.post(
         total:
           accountReels.length,
 
+        hasNextPage:
+          Boolean(
+            account.apifyPageId
+          ),
+
+        exhausted:
+          account.apifyExhausted,
+
+        nextPageSaved:
+          Boolean(
+            account.apifyPageId
+          ),
+
         oldestStored:
-          accountReels.length
-            ? accountReels[
-                accountReels.length -
-                  1
-              ].publishedAt
-            : null,
+          oldest?.publishedAt ||
+          null,
 
         newestStored:
-          accountReels.length
-            ? accountReels[0]
-                .publishedAt
-            : null,
+          newest?.publishedAt ||
+          null,
 
         reels:
           accountReels
       });
     } catch (error) {
       console.error(
-        'Instagram sync error:',
+        'Instagram V2.0 sync error:',
         error
       );
 
@@ -1558,9 +1986,82 @@ app.post(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
+ * FORCE RESET PAGINATION
+ * ========================================
+ *
+ * Useful if a cursor ever becomes invalid.
+ *
+ * This does NOT delete Reels.
+ *
+ * It only tells Clipper to start the
+ * account pagination again from the
+ * newest Reels.
+ */
+
+app.post(
+  '/api/accounts/:id/reset-pagination',
+  (req, res) => {
+    try {
+      const account =
+        db.accounts.find(
+          (item) =>
+            item.id ===
+            req.params.id
+        );
+
+      if (!account) {
+        return res
+          .status(404)
+          .json({
+            error:
+              'Instagram account not found.'
+          });
+      }
+
+      account.apifyPageId =
+        null;
+
+      account.apifyExhausted =
+        false;
+
+      account.apifyLastRunId =
+        null;
+
+      account.apifyLastSyncAt =
+        null;
+
+      account.updatedAt =
+        nowIso();
+
+      saveDb(db);
+
+      res.json({
+        ok:
+          true,
+
+        account
+      });
+    } catch (error) {
+      console.error(
+        'Reset pagination error:',
+        error
+      );
+
+      res
+        .status(500)
+        .json({
+          error:
+            error.message
+        });
+    }
+  }
+);
+
+/*
+ * ========================================
  * REELS
- * ----------------------------------------
+ * ========================================
  */
 
 app.get(
@@ -1639,9 +2140,9 @@ app.get(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * BATCHES
- * ----------------------------------------
+ * ========================================
  */
 
 app.get(
@@ -1715,9 +2216,9 @@ app.get(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * AI VIDEO ANALYSIS
- * ----------------------------------------
+ * ========================================
  */
 
 async function extractFrames(
@@ -2269,9 +2770,9 @@ app.post(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * HOOK
- * ----------------------------------------
+ * ========================================
  */
 
 app.post(
@@ -2326,9 +2827,9 @@ app.post(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * RENDER
- * ----------------------------------------
+ * ========================================
  */
 
 app.post(
@@ -2657,9 +3158,9 @@ app.post(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * JOBS
- * ----------------------------------------
+ * ========================================
  */
 
 app.get(
@@ -2752,9 +3253,9 @@ app.get(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * 404
- * ----------------------------------------
+ * ========================================
  */
 
 app.use(
@@ -2772,9 +3273,9 @@ app.use(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * ERROR HANDLER
- * ----------------------------------------
+ * ========================================
  */
 
 app.use(
@@ -2808,9 +3309,9 @@ app.use(
 );
 
 /*
- * ----------------------------------------
+ * ========================================
  * START
- * ----------------------------------------
+ * ========================================
  */
 
 app.listen(
@@ -2830,7 +3331,11 @@ app.listen(
     );
 
     console.log(
-      'Sync strategy: progressive-history'
+      'Apify mode: clips (Reels Only)'
+    );
+
+    console.log(
+      'Sync strategy: cursor-pagination'
     );
 
     console.log(
