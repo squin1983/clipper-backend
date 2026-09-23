@@ -19,29 +19,29 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
+const VERSION = '1.5';
 
-const DB_FILE = '/tmp/clipper-db.json';
-
-const APIFY_TOKEN = process.env.APIFY_TOKEN || '';
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
-
+const APIFY_TOKEN = process.env.APIFY_TOKEN;
 const APIFY_ACTOR =
+  process.env.APIFY_ACTOR ||
   'instagram-scraper~instagram-profile-reels-scraper';
 
-const OPENROUTER_MODEL = 'openrouter/free';
+const APIFY_POSTS_PER_PROFILE = Number(
+  process.env.APIFY_POSTS_PER_PROFILE || 500
+);
 
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL =
+  process.env.OPENROUTER_MODEL || 'openrouter/free';
+
+const DB_FILE = '/tmp/clipper-db.json';
 const RENDER_DIR = '/tmp/clipper-renders';
 
 if (!fs.existsSync(RENDER_DIR)) {
   fs.mkdirSync(RENDER_DIR, { recursive: true });
 }
 
-
-/* =========================================================
-   DATABASE
-========================================================= */
-
-function defaultDb() {
+function createEmptyDb() {
   return {
     accounts: [],
     reels: [],
@@ -50,294 +50,314 @@ function defaultDb() {
   };
 }
 
-
 function loadDb() {
   try {
     if (!fs.existsSync(DB_FILE)) {
-      return defaultDb();
+      return createEmptyDb();
     }
 
-    const raw = fs.readFileSync(DB_FILE, 'utf8');
-
-    if (!raw.trim()) {
-      return defaultDb();
-    }
-
-    const db = JSON.parse(raw);
+    const data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
 
     return {
-      accounts: Array.isArray(db.accounts) ? db.accounts : [],
-      reels: Array.isArray(db.reels) ? db.reels : [],
-      batches: Array.isArray(db.batches) ? db.batches : [],
-      jobs: Array.isArray(db.jobs) ? db.jobs : []
+      accounts: Array.isArray(data.accounts) ? data.accounts : [],
+      reels: Array.isArray(data.reels) ? data.reels : [],
+      batches: Array.isArray(data.batches) ? data.batches : [],
+      jobs: Array.isArray(data.jobs) ? data.jobs : []
     };
-
   } catch (error) {
-    console.error('Database load failed:', error);
-    return defaultDb();
+    console.error('DB load error:', error.message);
+    return createEmptyDb();
   }
 }
 
-
 function saveDb(db) {
-  fs.writeFileSync(
-    DB_FILE,
-    JSON.stringify(db, null, 2),
-    'utf8'
-  );
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-
-/* =========================================================
-   HELPERS
-========================================================= */
+function id() {
+  return crypto.randomUUID();
+}
 
 function cleanUsername(value) {
   return String(value || '')
     .trim()
     .replace(/^@/, '')
-    .replace(/^https?:\/\/(www\.)?instagram\.com\//i, '')
-    .replace(/\/.*$/, '')
-    .trim();
+    .replace(/\s+/g, '');
 }
 
-
-function getReelDate(reel) {
-  const possibleDates = [
-    reel.publishedAt,
-    reel.takenAt,
-    reel.timestamp,
-    reel.createdAt,
-    reel.date
-  ];
-
-  for (const value of possibleDates) {
-    if (!value) {
-      continue;
-    }
-
-    const time = new Date(value).getTime();
-
-    if (!Number.isNaN(time)) {
-      return time;
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (
+      value !== undefined &&
+      value !== null &&
+      String(value).trim() !== ''
+    ) {
+      return value;
     }
   }
 
   return null;
 }
 
+function getNested(obj, paths) {
+  for (const parts of paths) {
+    let current = obj;
 
-function normalizeReelDate(item) {
-  const possibleDates = [
-    item.publishedAt,
-    item.takenAt,
-    item.timestamp,
-    item.date,
-    item.createdAt
-  ];
+    for (const part of parts) {
+      if (current === undefined || current === null) {
+        break;
+      }
 
-  for (const value of possibleDates) {
-    if (!value) {
-      continue;
+      current = current[part];
     }
 
-    const parsed = new Date(value);
-
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed.toISOString();
+    if (
+      current !== undefined &&
+      current !== null &&
+      String(current).trim() !== ''
+    ) {
+      return current;
     }
   }
 
   return null;
 }
-
 
 function getInstagramUrl(item) {
-  return (
-    item.url ||
-    item.permalink ||
-    item.webUrl ||
-    item.shortcodeUrl ||
-    item.instagramUrl ||
-    null
+  return firstNonEmpty(
+    item.url,
+    item.permalink,
+    item.webUrl,
+    item.postUrl,
+    item.reelUrl,
+    item.reel_url,
+    item.shortcodeUrl,
+    item.instagramUrl,
+    item.inputUrl
   );
 }
-
 
 function getVideoUrl(item) {
-  return (
-    item.videoUrl ||
-    item.video_url ||
-    item.downloadUrl ||
-    item.mediaUrl ||
-    null
+  return firstNonEmpty(
+    item.videoUrl,
+    item.video_url,
+    item.downloadUrl,
+    item.download_url,
+    item.mediaUrl,
+    item.video,
+    item.video?.url,
+    item.video?.videoUrl,
+    getNested(item, [
+      ['media', 'videoUrl'],
+      ['media', 'video_url'],
+      ['media', 'video', 'url'],
+      ['media', 'video', 'videoUrl']
+    ]),
+    getNested(item, [
+      ['video_versions', '0', 'url'],
+      ['videoVersions', '0', 'url']
+    ])
   );
 }
-
 
 function getThumbnailUrl(item) {
-  return (
-    item.displayUrl ||
-    item.thumbnailUrl ||
-    item.thumbnail ||
-    item.imageUrl ||
-    item.coverUrl ||
-    null
+  return firstNonEmpty(
+    item.displayUrl,
+    item.display_url,
+    item.thumbnailUrl,
+    item.thumbnail_url,
+    item.thumbnailSrc,
+    item.thumbnail,
+    item.imageUrl,
+    item.coverUrl,
+    item.image,
+    getNested(item, [
+      ['media', 'thumbnailUrl'],
+      ['media', 'thumbnail_url'],
+      ['media', 'thumbnail']
+    ])
   );
 }
-
 
 function getShortcode(item) {
-  return (
-    item.shortCode ||
-    item.shortcode ||
-    item.code ||
-    null
+  return firstNonEmpty(
+    item.shortCode,
+    item.short_code,
+    item.shortcode,
+    item.code
   );
 }
 
+function parseDateValue(value) {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
 
-function makeReelId(item) {
-  const source =
-    getInstagramUrl(item) ||
-    getShortcode(item) ||
-    crypto.randomUUID();
+  if (typeof value === 'number') {
+    const timestamp = value < 100000000000 ? value * 1000 : value;
+    const date = new Date(timestamp);
 
-  return crypto
-    .createHash('sha1')
-    .update(String(source))
-    .digest('hex')
-    .slice(0, 16);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  const stringValue = String(value).trim();
+
+  if (/^\d+$/.test(stringValue)) {
+    const number = Number(stringValue);
+    const timestamp =
+      number < 100000000000 ? number * 1000 : number;
+
+    const date = new Date(timestamp);
+
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  const date = new Date(stringValue);
+
+  return Number.isNaN(date.getTime())
+    ? null
+    : date.toISOString();
 }
 
+function normalizeReelDate(item) {
+  return parseDateValue(
+    firstNonEmpty(
+      item.publishedAt,
+      item.takenAt,
+      item.timestamp,
+      item.date,
+      item.createdAt,
+      item.taken_at,
+      item.takenAtTimestamp,
+      item.taken_at_timestamp,
+      item.pubDate,
+      item.pub_date
+    )
+  );
+}
 
-function sleep(ms) {
-  return new Promise(resolve => {
-    setTimeout(resolve, ms);
+function getCaption(item) {
+  return firstNonEmpty(
+    item.caption,
+    item.title,
+    item.description,
+    item.text,
+    item.captionText,
+    getNested(item, [
+      ['caption', 'text'],
+      ['edge_media_to_caption', 'edges', '0', 'node', 'text']
+    ])
+  ) || '';
+}
+
+function getDuration(item) {
+  const value = firstNonEmpty(
+    item.duration,
+    item.videoDuration,
+    item.video_duration,
+    getNested(item, [
+      ['video', 'duration'],
+      ['media', 'duration']
+    ])
+  );
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
+}
+
+function getSourceId(item) {
+  return firstNonEmpty(
+    item.id,
+    item.pk,
+    item.mediaId,
+    item.media_id
+  );
+}
+
+function isDuplicateReel(db, instagramUrl, shortcode) {
+  return db.reels.some((reel) => {
+    if (
+      instagramUrl &&
+      reel.instagramUrl &&
+      instagramUrl === reel.instagramUrl
+    ) {
+      return true;
+    }
+
+    if (
+      shortcode &&
+      reel.shortcode &&
+      shortcode === reel.shortcode
+    ) {
+      return true;
+    }
+
+    return false;
   });
 }
 
-
-/* =========================================================
-   GENERIC HTTP
-========================================================= */
+function safeFileName(value) {
+  return String(value || '')
+    .replace(/[^a-zA-Z0-9_-]/g, '_')
+    .slice(0, 100);
+}
 
 function requestJson(url, options = {}) {
   return new Promise((resolve, reject) => {
-
     const parsed = new URL(url);
+    const transport = parsed.protocol === 'https:' ? https : http;
 
-    const isHttps =
-      parsed.protocol === 'https:';
+    const request = transport.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || undefined,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+        timeout: options.timeout || 90000
+      },
+      (response) => {
+        let body = '';
 
-    const transport =
-      isHttps ? https : http;
+        response.setEncoding('utf8');
 
-    const timeout =
-      Number(options.timeout || 120000);
+        response.on('data', (chunk) => {
+          body += chunk;
+        });
 
-    const requestOptions = {
-      method: options.method || 'GET',
-      hostname: parsed.hostname,
-      port:
-        parsed.port ||
-        (isHttps ? 443 : 80),
-      path:
-        `${parsed.pathname}${parsed.search}`,
-      headers:
-        options.headers || {}
-    };
+        response.on('end', () => {
+          let parsedBody = body;
 
-    const request =
-      transport.request(
-        requestOptions,
-        response => {
+          try {
+            parsedBody = JSON.parse(body);
+          } catch (_) {}
 
-          let body = '';
+          if (
+            response.statusCode < 200 ||
+            response.statusCode >= 300
+          ) {
+            const error = new Error(
+              `HTTP ${response.statusCode}`
+            );
 
-          response.on(
-            'data',
-            chunk => {
-              body += chunk;
-            }
-          );
+            error.statusCode = response.statusCode;
+            error.body = parsedBody;
 
-          response.on(
-            'end',
-            () => {
+            reject(error);
+            return;
+          }
 
-              const status =
-                response.statusCode || 0;
-
-              let parsedBody = body;
-
-              try {
-                parsedBody =
-                  JSON.parse(body);
-              } catch (_) {
-                // Non-JSON response.
-              }
-
-              if (
-                status >= 200 &&
-                status < 300
-              ) {
-
-                resolve({
-                  status,
-                  body: parsedBody
-                });
-
-                return;
-              }
-
-              reject(
-                new Error(
-                  `HTTP ${status}: ${
-                    typeof parsedBody === 'string'
-                      ? parsedBody
-                      : JSON.stringify(parsedBody)
-                  }`
-                )
-              );
-            }
-          );
-        }
-      );
-
-    let timedOut = false;
-
-    request.setTimeout(
-      timeout,
-      () => {
-
-        timedOut = true;
-
-        request.destroy(
-          new Error(
-            `Request timed out after ${Math.round(timeout / 1000)} seconds.`
-          )
-        );
+          resolve(parsedBody);
+        });
       }
     );
 
-    request.on(
-      'error',
-      error => {
+    request.on('timeout', () => {
+      request.destroy(new Error('Request timed out'));
+    });
 
-        if (timedOut) {
-          reject(
-            new Error(
-              `Request timed out after ${Math.round(timeout / 1000)} seconds.`
-            )
-          );
-
-          return;
-        }
-
-        reject(error);
-      }
-    );
+    request.on('error', reject);
 
     if (options.body) {
       request.write(options.body);
@@ -347,2143 +367,1214 @@ function requestJson(url, options = {}) {
   });
 }
 
+function downloadFile(url, destination, redirects = 0) {
+  return new Promise((resolve, reject) => {
+    if (!url) {
+      reject(new Error('Missing download URL'));
+      return;
+    }
 
-/* =========================================================
-   DOWNLOAD
-========================================================= */
+    if (redirects > 8) {
+      reject(new Error('Too many redirects'));
+      return;
+    }
 
-function downloadFile(
-  url,
-  outputPath,
-  redirects = 0
-) {
+    let parsed;
 
-  return new Promise(
-    (resolve, reject) => {
+    try {
+      parsed = new URL(url);
+    } catch (_) {
+      reject(new Error('Invalid download URL'));
+      return;
+    }
 
-      if (redirects > 5) {
-        reject(
-          new Error(
-            'Too many download redirects.'
+    const transport =
+      parsed.protocol === 'https:' ? https : http;
+
+    const file = fs.createWriteStream(destination);
+
+    const request = transport.get(
+      url,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
+          Accept: '*/*',
+          Referer: 'https://www.instagram.com/'
+        },
+        timeout: 60000
+      },
+      (response) => {
+        if (
+          [301, 302, 303, 307, 308].includes(
+            response.statusCode
+          ) &&
+          response.headers.location
+        ) {
+          file.destroy();
+
+          downloadFile(
+            response.headers.location,
+            destination,
+            redirects + 1
           )
-        );
+            .then(resolve)
+            .catch(reject);
 
-        return;
-      }
-
-      let parsed;
-
-      try {
-        parsed = new URL(url);
-      } catch (error) {
-        reject(
-          new Error(
-            'Invalid video URL.'
-          )
-        );
-
-        return;
-      }
-
-      const transport =
-        parsed.protocol === 'https:'
-          ? https
-          : http;
-
-      const file =
-        fs.createWriteStream(
-          outputPath
-        );
-
-      let finished = false;
-
-      const cleanup = () => {
-
-        if (finished) {
           return;
         }
 
-        try {
-          file.close();
-        } catch (_) {}
-
-        try {
-          fs.unlinkSync(
-            outputPath
-          );
-        } catch (_) {}
-      };
-
-      const request =
-        transport.get(
-          url,
-          response => {
-
-            if (
-              response.statusCode >= 300 &&
-              response.statusCode < 400 &&
-              response.headers.location
-            ) {
-
-              const location =
-                new URL(
-                  response.headers.location,
-                  url
-                ).toString();
-
-              response.resume();
-
-              file.close();
-
-              try {
-                fs.unlinkSync(
-                  outputPath
-                );
-              } catch (_) {}
-
-              downloadFile(
-                location,
-                outputPath,
-                redirects + 1
-              )
-                .then(resolve)
-                .catch(reject);
-
-              return;
-            }
-
-            if (
-              response.statusCode !== 200
-            ) {
-
-              response.resume();
-
-              cleanup();
-
-              reject(
-                new Error(
-                  `Download failed with HTTP ${response.statusCode}`
-                )
-              );
-
-              return;
-            }
-
-            response.pipe(file);
-
-            file.on(
-              'finish',
-              () => {
-
-                finished = true;
-
-                file.close(
-                  () => resolve()
-                );
-              }
-            );
-          }
-        );
-
-      request.setTimeout(
-        60000,
-        () => {
-
-          request.destroy(
+        if (
+          response.statusCode < 200 ||
+          response.statusCode >= 300
+        ) {
+          file.destroy();
+          reject(
             new Error(
-              'Video download timed out after 60 seconds.'
+              `Download failed with HTTP ${response.statusCode}`
             )
           );
+          return;
         }
-      );
 
-      request.on(
-        'error',
-        error => {
+        response.pipe(file);
 
-          cleanup();
+        file.on('finish', () => {
+          file.close(() => {
+            try {
+              const stats = fs.statSync(destination);
 
-          reject(error);
-        }
-      );
-    }
-  );
-}
+              if (!stats.size) {
+                reject(new Error('Downloaded file is empty'));
+                return;
+              }
 
-
-/* =========================================================
-   APIFY
-========================================================= */
-
-async function runApifyProfile(username) {
-
-  if (!APIFY_TOKEN) {
-    throw new Error(
-      'APIFY_TOKEN is not configured on Render.'
-    );
-  }
-
-  const clean =
-    cleanUsername(username);
-
-  if (!clean) {
-    throw new Error(
-      'Instagram username is required.'
-    );
-  }
-
-  /*
-   * IMPORTANT:
-   * This actor uses postsPerProfile,
-   * not resultsLimit.
-   *
-   * This asks Apify for up to 150 Reels
-   * instead of only the newest small batch.
-   */
-
-  const input = {
-    instagramUsernames: [clean],
-    postsPerProfile: 150
-  };
-
-  const actorUrl =
-    `https://api.apify.com/v2/acts/${encodeURIComponent(
-      APIFY_ACTOR
-    )}/runs?token=${encodeURIComponent(
-      APIFY_TOKEN
-    )}`;
-
-  console.log(
-    'Starting Apify actor for:',
-    clean
-  );
-
-  console.log(
-    'Apify input:',
-    JSON.stringify(input)
-  );
-
-  const start =
-    await requestJson(
-      actorUrl,
-      {
-        method: 'POST',
-
-        headers: {
-          'Content-Type':
-            'application/json'
-        },
-
-        body:
-          JSON.stringify(input),
-
-        timeout:
-          30000
+              resolve(destination);
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
       }
     );
 
+    request.on('timeout', () => {
+      request.destroy(new Error('Download timed out'));
+    });
+
+    request.on('error', (error) => {
+      file.destroy();
+      reject(error);
+    });
+  });
+}
+
+async function runApifyProfile(username) {
+  if (!APIFY_TOKEN) {
+    throw new Error('APIFY_TOKEN is not configured on Render.');
+  }
+
+  const input = {
+    instagramUsernames: [username],
+    postsPerProfile: APIFY_POSTS_PER_PROFILE
+  };
+
+  console.log(
+    `Starting Apify for @${username}, postsPerProfile=${APIFY_POSTS_PER_PROFILE}`
+  );
+
+  const startUrl =
+    `https://api.apify.com/v2/acts/${encodeURIComponent(APIFY_ACTOR)}/runs` +
+    `?token=${encodeURIComponent(APIFY_TOKEN)}`;
+
+  const startResponse = await requestJson(startUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(input),
+    timeout: 60000
+  });
+
   const runId =
-    start.body &&
-    start.body.data &&
-    start.body.data.id;
+    startResponse?.data?.id ||
+    startResponse?.id;
 
   if (!runId) {
-
     throw new Error(
-      `Apify start failed: ${JSON.stringify(
-        start.body
-      )}`
+      'Apify did not return a run ID.'
+    );
+  }
+
+  console.log(`Apify run started: ${runId}`);
+
+  let runData = null;
+
+  for (let attempt = 1; attempt <= 80; attempt++) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, 3000)
+    );
+
+    const statusUrl =
+      `https://api.apify.com/v2/actor-runs/${runId}` +
+      `?token=${encodeURIComponent(APIFY_TOKEN)}`;
+
+    const statusResponse = await requestJson(
+      statusUrl,
+      {
+        timeout: 30000
+      }
+    );
+
+    runData = statusResponse?.data || statusResponse;
+
+    const status = runData?.status;
+
+    console.log(
+      `Apify status ${attempt}/80: ${status}`
+    );
+
+    if (
+      ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(
+        status
+      )
+    ) {
+      break;
+    }
+  }
+
+  if (!runData) {
+    throw new Error('No Apify run status received.');
+  }
+
+  if (runData.status !== 'SUCCEEDED') {
+    throw new Error(
+      `Apify run ended with status: ${runData.status}`
+    );
+  }
+
+  const datasetId = runData.defaultDatasetId;
+
+  if (!datasetId) {
+    throw new Error(
+      'Apify run completed but no dataset was returned.'
+    );
+  }
+
+  const datasetUrl =
+    `https://api.apify.com/v2/datasets/${datasetId}/items` +
+    `?token=${encodeURIComponent(APIFY_TOKEN)}` +
+    `&clean=true`;
+
+  const items = await requestJson(datasetUrl, {
+    timeout: 60000
+  });
+
+  if (!Array.isArray(items)) {
+    throw new Error(
+      'Apify returned an invalid dataset.'
     );
   }
 
   console.log(
-    'Apify run started:',
-    runId
+    `Apify returned ${items.length} items for @${username}`
   );
 
-  const maxAttempts = 60;
+  if (items.length > 0) {
+    console.log(
+      'First Apify item keys:',
+      Object.keys(items[0])
+    );
 
-  for (
-    let attempt = 0;
-    attempt < maxAttempts;
-    attempt++
-  ) {
+    console.log(
+      'First Apify item sample:',
+      JSON.stringify(items[0], null, 2).slice(0, 5000)
+    );
+  }
 
-    await sleep(3000);
+  return items;
+}
 
-    const statusUrl =
-      `https://api.apify.com/v2/actor-runs/${encodeURIComponent(
-        runId
-      )}?token=${encodeURIComponent(
-        APIFY_TOKEN
-      )}`;
+async function extractFrames(videoPath, workDir) {
+  const framesDir = path.join(workDir, 'frames');
 
-    const statusResponse =
-      await requestJson(
-        statusUrl,
+  fs.mkdirSync(framesDir, { recursive: true });
+
+  let duration = null;
+
+  try {
+    const result = await execFileAsync(
+      'ffprobe',
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        videoPath
+      ],
+      {
+        timeout: 30000
+      }
+    );
+
+    const parsed = Number(
+      String(result.stdout || '').trim()
+    );
+
+    if (Number.isFinite(parsed) && parsed > 0) {
+      duration = parsed;
+    }
+  } catch (error) {
+    console.warn(
+      'ffprobe duration failed:',
+      error.message
+    );
+  }
+
+  const framePaths = [];
+
+  if (duration) {
+    const percentages = [0.08, 0.35, 0.65, 0.92];
+
+    for (let i = 0; i < percentages.length; i++) {
+      const timestamp = Math.max(
+        0,
+        Math.min(
+          duration - 0.1,
+          duration * percentages[i]
+        )
+      );
+
+      const output = path.join(
+        framesDir,
+        `frame-${i + 1}.jpg`
+      );
+
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-y',
+          '-ss',
+          String(timestamp),
+          '-i',
+          videoPath,
+          '-frames:v',
+          '1',
+          '-vf',
+          'scale=512:-2',
+          '-q:v',
+          '6',
+          output
+        ],
         {
           timeout: 30000
         }
       );
 
-    const status =
-      statusResponse.body &&
-      statusResponse.body.data &&
-      statusResponse.body.data.status;
-
-    console.log(
-      `Apify status ${attempt + 1}/${maxAttempts}:`,
-      status
-    );
-
-    if (
-      status === 'SUCCEEDED'
-    ) {
-
-      const datasetId =
-        statusResponse.body.data
-          .defaultDatasetId;
-
-      if (!datasetId) {
-        throw new Error(
-          'Apify completed but returned no dataset ID.'
-        );
+      if (fs.existsSync(output)) {
+        framePaths.push(output);
       }
+    }
+  }
 
-      const datasetUrl =
-        `https://api.apify.com/v2/datasets/${encodeURIComponent(
-          datasetId
-        )}/items?clean=true&token=${encodeURIComponent(
-          APIFY_TOKEN
-        )}`;
+  if (framePaths.length < 2) {
+    for (let i = 0; i < 4; i++) {
+      const output = path.join(
+        framesDir,
+        `fallback-${i + 1}.jpg`
+      );
 
-      const dataset =
-        await requestJson(
-          datasetUrl,
+      try {
+        await execFileAsync(
+          'ffmpeg',
+          [
+            '-y',
+            '-i',
+            videoPath,
+            '-vf',
+            'fps=1/4,scale=512:-2',
+            '-frames:v',
+            '1',
+            '-q:v',
+            '6',
+            output
+          ],
           {
-            timeout: 60000
+            timeout: 30000
           }
         );
 
-      const items =
-        Array.isArray(dataset.body)
-          ? dataset.body
-          : [];
-
-      console.log(
-        'Apify returned items:',
-        items.length
-      );
-
-      return items;
+        if (fs.existsSync(output)) {
+          framePaths.push(output);
+        }
+      } catch (_) {}
     }
+  }
 
-    if (
-      status === 'FAILED' ||
-      status === 'ABORTED' ||
-      status === 'TIMED-OUT'
-    ) {
+  if (!framePaths.length) {
+    throw new Error(
+      'FFmpeg could not extract frames from the Reel.'
+    );
+  }
 
-      throw new Error(
-        `Apify run ended with status: ${status}`
+  return framePaths.slice(0, 4);
+}
+
+function parseAiJson(content) {
+  let text = String(content || '').trim();
+
+  text = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(text);
+  } catch (_) {}
+
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+
+  if (start !== -1 && end > start) {
+    try {
+      return JSON.parse(
+        text.slice(start, end + 1)
       );
-    }
+    } catch (_) {}
   }
 
   throw new Error(
-    'Apify run timed out after approximately 3 minutes.'
+    'AI returned invalid JSON.'
   );
 }
-
-
-/* =========================================================
-   HEALTH
-========================================================= */
-
-app.get(
-  '/api/health',
-  (req, res) => {
-
-    res.json({
-      ok: true,
-      version: '1.4',
-      service: 'clipper-backend',
-
-      aiConfigured:
-        Boolean(
-          OPENROUTER_API_KEY
-        ),
-
-      apifyConfigured:
-        Boolean(
-          APIFY_TOKEN
-        )
-    });
-  }
-);
-
-
-/* =========================================================
-   ACCOUNTS
-========================================================= */
-
-app.get(
-  '/api/accounts',
-  (req, res) => {
-
-    const db =
-      loadDb();
-
-    res.json({
-      accounts:
-        db.accounts
-    });
-  }
-);
-
-
-app.post(
-  '/api/accounts',
-  (req, res) => {
-
-    try {
-
-      const db =
-        loadDb();
-
-      const username =
-        cleanUsername(
-          req.body.username
-        );
-
-      const name =
-        String(
-          req.body.name ||
-          username
-        ).trim();
-
-      const category =
-        String(
-          req.body.category ||
-          'meme'
-        ).trim();
-
-      if (!username) {
-
-        return res.status(400).json({
-          error:
-            'Instagram username is required.'
-        });
-      }
-
-      const existing =
-        db.accounts.find(
-          account =>
-            account.username.toLowerCase() ===
-            username.toLowerCase()
-        );
-
-      if (existing) {
-
-        return res.json({
-          account:
-            existing
-        });
-      }
-
-      const account = {
-
-        id:
-          crypto.randomUUID(),
-
-        username,
-
-        name,
-
-        category,
-
-        createdAt:
-          new Date().toISOString()
-      };
-
-      db.accounts.push(
-        account
-      );
-
-      saveDb(db);
-
-      res.json({
-        account
-      });
-
-    } catch (error) {
-
-      console.error(
-        'Create account failed:',
-        error
-      );
-
-      res.status(500).json({
-        error:
-          error.message
-      });
-    }
-  }
-);
-
-
-app.delete(
-  '/api/accounts/:id',
-  (req, res) => {
-
-    try {
-
-      const db =
-        loadDb();
-
-      const id =
-        String(req.params.id);
-
-      db.accounts =
-        db.accounts.filter(
-          account =>
-            String(account.id) !== id
-        );
-
-      saveDb(db);
-
-      res.json({
-        ok: true
-      });
-
-    } catch (error) {
-
-      res.status(500).json({
-        error:
-          error.message
-      });
-    }
-  }
-);
-
-
-/* =========================================================
-   SYNC ACCOUNT
-========================================================= */
-
-app.post(
-  '/api/accounts/:id/sync',
-  async (req, res) => {
-
-    try {
-
-      const db =
-        loadDb();
-
-      const account =
-        db.accounts.find(
-          item =>
-            String(item.id) ===
-            String(req.params.id)
-        );
-
-      if (!account) {
-
-        return res.status(404).json({
-          error:
-            'Account not found.'
-        });
-      }
-
-      console.log(
-        `Sync started for @${account.username}`
-      );
-
-      const items =
-        await runApifyProfile(
-          account.username
-        );
-
-      let added = 0;
-      let skipped = 0;
-
-      for (const item of items) {
-
-        const instagramUrl =
-          getInstagramUrl(item);
-
-        const shortcode =
-          getShortcode(item);
-
-        const duplicate =
-          db.reels.find(
-            reel => {
-
-              if (
-                instagramUrl &&
-                reel.instagramUrl
-              ) {
-
-                return (
-                  reel.instagramUrl ===
-                  instagramUrl
-                );
-              }
-
-              if (
-                shortcode &&
-                reel.shortcode
-              ) {
-
-                return (
-                  reel.shortcode ===
-                  shortcode
-                );
-              }
-
-              return false;
-            }
-          );
-
-        if (duplicate) {
-
-          skipped++;
-
-          continue;
-        }
-
-        const reel = {
-
-          id:
-            makeReelId(item),
-
-          accountId:
-            account.id,
-
-          accountUsername:
-            account.username,
-
-          shortcode,
-
-          instagramUrl,
-
-          videoUrl:
-            getVideoUrl(item),
-
-          thumbnailUrl:
-            getThumbnailUrl(item),
-
-          publishedAt:
-            normalizeReelDate(item),
-
-          title:
-            item.caption ||
-            item.title ||
-            '',
-
-          caption:
-            item.caption ||
-            '',
-
-          duration:
-            item.duration ||
-            null,
-
-          used:
-            false,
-
-          analyzed:
-            false,
-
-          analysis:
-            null,
-
-          selectedHook:
-            null,
-
-          aiCaption:
-            null,
-
-          rendered:
-            false,
-
-          renderedAt:
-            null,
-
-          createdAt:
-            new Date().toISOString(),
-
-          source:
-            item
-        };
-
-        db.reels.push(
-          reel
-        );
-
-        added++;
-      }
-
-      saveDb(db);
-
-      const storedForAccount =
-        db.reels.filter(
-          reel =>
-            String(reel.accountId) ===
-            String(account.id)
-        );
-
-      console.log(
-        `Sync completed for @${account.username}:`,
-        {
-          received:
-            items.length,
-
-          added,
-
-          skipped,
-
-          stored:
-            storedForAccount.length
-        }
-      );
-
-      res.json({
-
-        ok: true,
-
-        account,
-
-        totalFromInstagram:
-          items.length,
-
-        added,
-
-        skipped,
-
-        totalStored:
-          storedForAccount.length
-      });
-
-    } catch (error) {
-
-      console.error(
-        'Sync failed:',
-        error
-      );
-
-      res.status(500).json({
-
-        error:
-          error.message ||
-          'Instagram sync failed.'
-      });
-    }
-  }
-);
-
-
-/* =========================================================
-   REELS
-========================================================= */
-
-app.get(
-  '/api/reels',
-  (req, res) => {
-
-    const db =
-      loadDb();
-
-    let reels =
-      [...db.reels];
-
-    if (req.query.accountId) {
-
-      reels =
-        reels.filter(
-          reel =>
-            String(reel.accountId) ===
-            String(req.query.accountId)
-        );
-    }
-
-    if (
-      req.query.unused === 'true'
-    ) {
-
-      reels =
-        reels.filter(
-          reel =>
-            !reel.used
-        );
-    }
-
-    reels.sort(
-      (a, b) => {
-
-        const dateA =
-          getReelDate(a);
-
-        const dateB =
-          getReelDate(b);
-
-        if (
-          dateA === null &&
-          dateB === null
-        ) {
-
-          return String(a.id)
-            .localeCompare(
-              String(b.id)
-            );
-        }
-
-        if (
-          dateA === null
-        ) {
-
-          return 1;
-        }
-
-        if (
-          dateB === null
-        ) {
-
-          return -1;
-        }
-
-        return dateA - dateB;
-      }
-    );
-
-    const limit =
-      Math.min(
-        Math.max(
-          Number(req.query.limit) ||
-          100,
-          1
-        ),
-        500
-      );
-
-    reels =
-      reels.slice(
-        0,
-        limit
-      );
-
-    res.json({
-      reels
-    });
-  }
-);
-
-
-/* =========================================================
-   OLDEST UNUSED BATCH
-========================================================= */
-
-app.get(
-  '/api/batch/random',
-  (req, res) => {
-
-    try {
-
-      const db =
-        loadDb();
-
-      const accountId =
-        req.query.accountId
-          ? String(
-              req.query.accountId
-            )
-          : null;
-
-      const limit =
-        Math.min(
-          Math.max(
-            Number(req.query.limit) ||
-            10,
-            1
-          ),
-          50
-        );
-
-      let candidates =
-        db.reels.filter(
-          reel => {
-
-            if (reel.used) {
-              return false;
-            }
-
-            if (
-              accountId &&
-              String(
-                reel.accountId
-              ) !== accountId
-            ) {
-
-              return false;
-            }
-
-            return true;
-          }
-        );
-
-      candidates.sort(
-        (a, b) => {
-
-          const dateA =
-            getReelDate(a);
-
-          const dateB =
-            getReelDate(b);
-
-          if (
-            dateA === null &&
-            dateB === null
-          ) {
-
-            return String(a.id)
-              .localeCompare(
-                String(b.id)
-              );
-          }
-
-          if (
-            dateA === null
-          ) {
-
-            return 1;
-          }
-
-          if (
-            dateB === null
-          ) {
-
-            return -1;
-          }
-
-          return dateA - dateB;
-        }
-      );
-
-      const selected =
-        candidates.slice(
-          0,
-          limit
-        );
-
-      const batch = {
-
-        id:
-          crypto.randomUUID(),
-
-        accountId:
-          accountId || null,
-
-        reelIds:
-          selected.map(
-            reel =>
-              reel.id
-          ),
-
-        createdAt:
-          new Date().toISOString()
-      };
-
-      db.batches.unshift(
-        batch
-      );
-
-      saveDb(db);
-
-      res.json({
-
-        batch,
-
-        reels:
-          selected,
-
-        count:
-          selected.length
-      });
-
-    } catch (error) {
-
-      console.error(
-        'Batch failed:',
-        error
-      );
-
-      res.status(500).json({
-
-        error:
-          error.message ||
-          'Failed to create batch.'
-      });
-    }
-  }
-);
-
-
-/* =========================================================
-   AI FRAME EXTRACTION
-========================================================= */
-
-async function extractFrames(
-  videoPath,
-  outputDir
-) {
-
-  if (
-    !fs.existsSync(
-      outputDir
-    )
-  ) {
-
-    fs.mkdirSync(
-      outputDir,
-      {
-        recursive: true
-      }
-    );
-  }
-
-  const pattern =
-    path.join(
-      outputDir,
-      'frame-%02d.jpg'
-    );
-
-  console.log(
-    'Extracting AI frames...'
-  );
-
-  /*
-   * 4 frames instead of 6.
-   * Smaller 512px images = much smaller
-   * OpenRouter request.
-   */
-
-  await execFileAsync(
-    'ffmpeg',
-    [
-      '-y',
-
-      '-i',
-      videoPath,
-
-      '-vf',
-      'fps=1/4,scale=512:-2',
-
-      '-frames:v',
-      '4',
-
-      '-q:v',
-      '5',
-
-      pattern
-    ],
-    {
-      timeout:
-        45000
-    }
-  );
-
-  const files =
-    fs.readdirSync(
-      outputDir
-    )
-      .filter(
-        file =>
-          /^frame-\d+\.jpg$/i.test(
-            file
-          )
-      )
-      .sort();
-
-  console.log(
-    'AI frames extracted:',
-    files.length
-  );
-
-  return files.map(
-    file =>
-      path.join(
-        outputDir,
-        file
-      )
-  );
-}
-
-
-function fileToDataUrl(
-  filePath
-) {
-
-  const buffer =
-    fs.readFileSync(
-      filePath
-    );
-
-  return (
-    'data:image/jpeg;base64,' +
-    buffer.toString(
-      'base64'
-    )
-  );
-}
-
-
-/* =========================================================
-   OPENROUTER AI
-========================================================= */
 
 async function analyzeWithOpenRouter(
-  frameFiles,
+  framePaths,
   reel
 ) {
-
   if (!OPENROUTER_API_KEY) {
-
     throw new Error(
       'OPENROUTER_API_KEY is not configured on Render.'
     );
   }
 
-  console.log(
-    'Preparing AI request...'
-  );
-
-  const imageMessages =
-    frameFiles.map(
-      file => ({
-
-        type:
-          'image_url',
-
-        image_url: {
-          url:
-            fileToDataUrl(
-              file
-            )
-        }
-      })
-    );
+  const images = framePaths.map((filePath) => ({
+    type: 'image_url',
+    image_url: {
+      url:
+        'data:image/jpeg;base64,' +
+        fs
+          .readFileSync(filePath)
+          .toString('base64')
+    }
+  }));
 
   const prompt = `
-You are Clipper, a private Instagram Reel editing assistant.
+Analyze this Instagram Reel for a short-form content remix workflow.
 
-Analyze ONLY what is visibly present in the provided video frames.
+Reel caption:
+${reel.title || '(no caption)'}
 
-Do NOT invent dialogue, people, events, locations, relationships, plot details, or facts that cannot be seen.
-
-Return valid JSON with:
+Return ONLY valid JSON in exactly this structure:
 
 {
-  "summary": "short factual description",
+  "summary": "short description of what happens in the Reel",
   "hooks": [
-    "short hook 1",
-    "short hook 2",
-    "short hook 3",
-    "short hook 4",
-    "short hook 5"
+    "hook 1",
+    "hook 2",
+    "hook 3",
+    "hook 4",
+    "hook 5"
   ],
-  "caption": "short social media caption"
+  "caption": "short English caption for the remixed Reel"
 }
 
-Rules for hooks:
-- exactly 5 hooks
-- maximum 12 words each
-- modern social-media language
-- specific to this actual video
-- curiosity-driven
-- natural
-- do not copy source wording
-- do not invent facts
-
-The source caption is only context and must not be treated as proof of something that cannot be seen:
-
-${String(
-  reel.caption || ''
-).slice(0, 600)}
+Rules:
+- Exactly 5 hooks.
+- Each hook must be 12 words or fewer.
+- Hooks must be attention-grabbing and suitable as on-screen text.
+- Do not invent facts that are not visible or supported by the Reel.
+- Caption must be in English.
+- No markdown.
 `;
 
   const body = {
-
-    model:
-      OPENROUTER_MODEL,
-
+    model: OPENROUTER_MODEL,
     messages: [
-
       {
-        role:
-          'system',
-
+        role: 'system',
         content:
-          'Be concise, factual and visual. Never invent facts.'
+          'You analyze short-form videos. Always return valid JSON only.'
       },
-
       {
-        role:
-          'user',
-
+        role: 'user',
         content: [
-
           {
-            type:
-              'text',
-
-            text:
-              prompt
+            type: 'text',
+            text: prompt
           },
-
-          ...imageMessages
-
+          ...images
         ]
       }
-
     ],
-
-    temperature:
-      0.4,
-
-    max_tokens:
-      500
+    temperature: 0.4,
+    max_tokens: 700,
+    response_format: {
+      type: 'json_object'
+    }
   };
 
-  console.log(
-    'Sending AI request to OpenRouter...'
-  );
-
-  const started =
-    Date.now();
-
-  let response;
-
-  try {
-
-    response =
-      await requestJson(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          method:
-            'POST',
-
-          headers: {
-
-            'Content-Type':
-              'application/json',
-
-            'Authorization':
-              `Bearer ${OPENROUTER_API_KEY}`,
-
-            'HTTP-Referer':
-              'https://squin1983.github.io/Clipper/',
-
-            'X-Title':
-              'Clipper'
-          },
-
-          body:
-            JSON.stringify(body),
-
-          /*
-           * IMPORTANT:
-           * Never let the UI remain stuck forever.
-           */
-
-          timeout:
-            75000
-        }
-      );
-
-  } catch (error) {
-
-    console.error(
-      'OpenRouter request failed:',
-      error.message
-    );
-
-    throw new Error(
-      `AI request failed: ${error.message}`
-    );
-  }
-
-  console.log(
-    `OpenRouter response received after ${
-      Math.round(
-        (Date.now() - started) / 1000
-      )
-    } seconds`
+  const response = await requestJson(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization:
+          `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer':
+          'https://squin1983.github.io/Clipper/',
+        'X-Title': 'Clipper',
+      },
+      body: JSON.stringify(body),
+      timeout: 90000
+    }
   );
 
   const content =
-    response.body &&
-    response.body.choices &&
-    response.body.choices[0] &&
-    response.body.choices[0].message &&
-    response.body.choices[0].message.content;
+    response?.choices?.[0]?.message?.content;
 
   if (!content) {
-
-    console.error(
-      'OpenRouter response:',
-      JSON.stringify(
-        response.body
-      )
-    );
-
     throw new Error(
       'OpenRouter returned no AI content.'
     );
   }
 
-  let cleaned =
-    String(content)
-      .trim()
-      .replace(
-        /^```json/i,
-        ''
-      )
-      .replace(
-        /^```/i,
-        ''
-      )
-      .replace(
-        /```$/i,
-        ''
-      )
-      .trim();
+  return parseAiJson(content);
+}
 
-  let parsed;
-
-  try {
-
-    parsed =
-      JSON.parse(
-        cleaned
-      );
-
-  } catch (error) {
-
-    const firstBrace =
-      cleaned.indexOf('{');
-
-    const lastBrace =
-      cleaned.lastIndexOf('}');
-
-    if (
-      firstBrace >= 0 &&
-      lastBrace > firstBrace
-    ) {
-
-      parsed =
-        JSON.parse(
-          cleaned.slice(
-            firstBrace,
-            lastBrace + 1
-          )
-        );
-
-    } else {
-
-      console.error(
-        'Invalid AI JSON:',
-        cleaned
-      );
-
-      throw new Error(
-        'AI returned invalid JSON.'
-      );
-    }
+function normalizeHooks(hooks) {
+  if (!Array.isArray(hooks)) {
+    return [];
   }
 
-  const hooks =
-    Array.isArray(
-      parsed.hooks
-    )
-      ? parsed.hooks
-          .map(
-            hook =>
-              String(
-                hook
-              ).trim()
-          )
-          .filter(Boolean)
-          .slice(0, 5)
-      : [];
+  return hooks
+    .map((hook) => String(hook || '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
 
-  while (
-    hooks.length < 5
-  ) {
+function normalizeAiResult(result) {
+  const hooks = normalizeHooks(result?.hooks);
 
+  while (hooks.length < 5) {
     hooks.push('');
   }
 
   return {
-
     summary:
-      String(
-        parsed.summary || ''
-      ).trim(),
-
+      String(result?.summary || '').trim(),
     hooks,
-
     caption:
-      String(
-        parsed.caption || ''
-      ).trim()
+      String(result?.caption || '').trim()
   };
 }
 
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    version: VERSION,
+    model: OPENROUTER_MODEL,
+    apifyPostsPerProfile:
+      APIFY_POSTS_PER_PROFILE,
+    time: new Date().toISOString()
+  });
+});
 
-/* =========================================================
-   ANALYZE REEL
-========================================================= */
+app.get('/api/accounts', (req, res) => {
+  const db = loadDb();
+  res.json(db.accounts);
+});
 
-app.post(
-  '/api/reels/:id/analyze',
-  async (req, res) => {
+app.post('/api/accounts', (req, res) => {
+  try {
+    const db = loadDb();
+    const username = cleanUsername(
+      req.body?.username
+    );
 
-    let workDir = null;
+    if (!username) {
+      return res.status(400).json({
+        error: 'Instagram username is required.'
+      });
+    }
 
-    try {
+    const existing = db.accounts.find(
+      (account) =>
+        account.username.toLowerCase() ===
+        username.toLowerCase()
+    );
 
-      const db =
-        loadDb();
+    if (existing) {
+      return res.json(existing);
+    }
 
-      const reel =
-        db.reels.find(
-          item =>
-            String(
-              item.id
-            ) ===
-            String(
-              req.params.id
-            )
-        );
+    const account = {
+      id: id(),
+      username,
+      createdAt: new Date().toISOString()
+    };
 
-      if (!reel) {
+    db.accounts.push(account);
+    saveDb(db);
 
-        return res.status(404).json({
-          error:
-            'Reel not found.'
-        });
-      }
+    res.json(account);
+  } catch (error) {
+    console.error('Create account error:', error);
 
-      if (!reel.videoUrl) {
+    res.status(500).json({
+      error: error.message
+    });
+  }
+});
 
-        return res.status(400).json({
-          error:
-            'This Reel does not have a downloadable video URL.'
-        });
-      }
+app.delete('/api/accounts/:id', (req, res) => {
+  try {
+    const db = loadDb();
 
-      console.log(
-        '======================================'
-      );
+    const accountId = req.params.id;
 
-      console.log(
-        'AI ANALYSIS START'
-      );
+    db.accounts = db.accounts.filter(
+      (account) => account.id !== accountId
+    );
 
-      console.log(
-        'Reel:',
-        reel.instagramUrl
-      );
+    db.reels = db.reels.filter(
+      (reel) => reel.accountId !== accountId
+    );
 
-      console.log(
-        'Video URL:',
-        reel.videoUrl
-      );
+    db.batches = db.batches.filter(
+      (batch) => batch.accountId !== accountId
+    );
 
-      workDir =
-        path.join(
-          '/tmp',
-          `clipper-ai-${crypto.randomUUID()}`
-        );
+    saveDb(db);
 
-      fs.mkdirSync(
-        workDir,
-        {
-          recursive: true
-        }
-      );
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Delete account error:', error);
 
-      const videoPath =
-        path.join(
-          workDir,
-          'source.mp4'
-        );
+    res.status(500).json({
+      error: error.message
+    });
+  }
+});
 
-      console.log(
-        'Downloading video for AI...'
-      );
+app.post('/api/accounts/:id/sync', async (req, res) => {
+  try {
+    const db = loadDb();
 
-      const downloadStarted =
-        Date.now();
+    const account = db.accounts.find(
+      (item) => item.id === req.params.id
+    );
 
-      await downloadFile(
-        reel.videoUrl,
-        videoPath
-      );
+    if (!account) {
+      return res.status(404).json({
+        error: 'Instagram account not found.'
+      });
+    }
 
-      console.log(
-        `Video downloaded in ${
-          Math.round(
-            (Date.now() -
-              downloadStarted) /
-              1000
-          )
-        } seconds`
-      );
+    const items = await runApifyProfile(
+      account.username
+    );
 
-      const stats =
-        fs.statSync(
-          videoPath
-        );
+    let added = 0;
+    let skipped = 0;
 
-      console.log(
-        'Downloaded video size:',
-        Math.round(
-          stats.size /
-          1024 /
-          1024
-        ),
-        'MB'
-      );
+    for (const item of items) {
+      const instagramUrl =
+        getInstagramUrl(item);
 
-      const frameDir =
-        path.join(
-          workDir,
-          'frames'
-        );
-
-      const frameFiles =
-        await extractFrames(
-          videoPath,
-          frameDir
-        );
+      const shortcode =
+        getShortcode(item);
 
       if (
-        !frameFiles.length
+        !instagramUrl &&
+        !shortcode
       ) {
-
-        throw new Error(
-          'Could not extract video frames.'
-        );
+        skipped++;
+        continue;
       }
 
-      const analysis =
-        await analyzeWithOpenRouter(
-          frameFiles,
-          reel
-        );
-
-      reel.analysis =
-        analysis;
-
-      reel.analyzed =
-        true;
-
-      reel.selectedHook =
-        analysis.hooks[0] || '';
-
-      reel.aiCaption =
-        analysis.caption || '';
-
-      saveDb(db);
-
-      console.log(
-        'AI ANALYSIS COMPLETED'
-      );
-
-      console.log(
-        '======================================'
-      );
-
-      res.json({
-
-        ok: true,
-
-        reel,
-
-        analysis
-      });
-
-    } catch (error) {
-
-      console.error(
-        '======================================'
-      );
-
-      console.error(
-        'AI ANALYSIS FAILED:',
-        error
-      );
-
-      console.error(
-        '======================================'
-      );
-
-      res.status(500).json({
-
-        error:
-          error.message ||
-          'AI analysis failed.'
-      });
-
-    } finally {
-
-      if (workDir) {
-
-        try {
-
-          fs.rmSync(
-            workDir,
-            {
-              recursive:
-                true,
-
-              force:
-                true
-            }
-          );
-
-        } catch (_) {}
-      }
-    }
-  }
-);
-
-
-/* =========================================================
-   RENDER
-========================================================= */
-
-app.post(
-  '/api/jobs/:id/render',
-  async (req, res) => {
-
-    try {
-
-      const db =
-        loadDb();
-
-      const reel =
-        db.reels.find(
-          item =>
-            String(
-              item.id
-            ) ===
-            String(
-              req.params.id
-            )
-        );
-
-      if (!reel) {
-
-        return res.status(404).json({
-          error:
-            'Reel not found.'
-        });
+      if (
+        isDuplicateReel(
+          db,
+          instagramUrl,
+          shortcode
+        )
+      ) {
+        skipped++;
+        continue;
       }
 
-      if (!reel.videoUrl) {
-
-        return res.status(400).json({
-          error:
-            'This Reel does not have a video URL.'
-        });
-      }
-
-      const hook =
-        String(
-          req.body.hook ||
-          reel.selectedHook ||
-          ''
-        ).trim();
-
-      if (!hook) {
-
-        return res.status(400).json({
-          error:
-            'A hook is required before rendering.'
-        });
-      }
-
-      const jobId =
-        crypto.randomUUID();
-
-      const job = {
-
-        id:
-          jobId,
-
-        reelId:
-          reel.id,
-
-        status:
-          'processing',
-
-        hook,
-
+      const reel = {
+        id: id(),
+        accountId: account.id,
+        accountUsername: account.username,
+        shortcode:
+          shortcode ||
+          getSourceId(item) ||
+          null,
+        instagramUrl:
+          instagramUrl ||
+          null,
+        videoUrl:
+          getVideoUrl(item),
+        thumbnailUrl:
+          getThumbnailUrl(item),
+        publishedAt:
+          normalizeReelDate(item),
+        title:
+          getCaption(item),
+        duration:
+          getDuration(item),
+        used: false,
+        analyzed: false,
+        analysis: null,
+        selectedHook: null,
+        aiCaption: null,
+        rendered: false,
+        renderedAt: null,
         createdAt:
           new Date().toISOString(),
-
-        outputPath:
-          null,
-
-        error:
-          null
+        source: 'apify'
       };
 
-      db.jobs.unshift(
-        job
-      );
+      db.reels.push(reel);
+      added++;
+    }
 
-      saveDb(db);
+    saveDb(db);
 
-      const workDir =
-        path.join(
-          '/tmp',
-          `clipper-render-${jobId}`
-        );
+    const dates = db.reels
+      .filter(
+        (reel) =>
+          reel.accountId === account.id &&
+          reel.publishedAt
+      )
+      .map((reel) =>
+        new Date(reel.publishedAt).getTime()
+      )
+      .filter(Number.isFinite);
 
-      fs.mkdirSync(
-        workDir,
-        {
-          recursive:
-            true
-        }
-      );
+    res.json({
+      ok: true,
+      account,
+      fetched: items.length,
+      added,
+      skipped,
+      oldestReturned:
+        dates.length
+          ? new Date(
+              Math.min(...dates)
+            ).toISOString()
+          : null,
+      newestReturned:
+        dates.length
+          ? new Date(
+              Math.max(...dates)
+            ).toISOString()
+          : null
+    });
+  } catch (error) {
+    console.error(
+      'Instagram sync error:',
+      error
+    );
 
-      const inputPath =
-        path.join(
-          workDir,
-          'input.mp4'
-        );
+    res.status(500).json({
+      error:
+        error.message ||
+        'Instagram sync failed.'
+    });
+  }
+});
 
-      const outputPath =
-        path.join(
-          RENDER_DIR,
-          `${jobId}.mp4`
-        );
+app.get('/api/reels', (req, res) => {
+  const db = loadDb();
 
-      console.log(
-        'Downloading Reel for render...'
-      );
+  const limit = Math.min(
+    Number(req.query.limit) || 500,
+    1000
+  );
 
-      await downloadFile(
-        reel.videoUrl,
-        inputPath
-      );
+  const reels = [...db.reels]
+    .sort((a, b) => {
+      const dateA = a.publishedAt
+        ? new Date(a.publishedAt).getTime()
+        : 0;
 
-      const category =
-        String(
-          req.body.category ||
-          ''
-        ).toLowerCase();
+      const dateB = b.publishedAt
+        ? new Date(b.publishedAt).getTime()
+        : 0;
 
-      const isMovie =
-        category === 'movie_tv' ||
-        category === 'movie' ||
-        category === 'tv';
+      return dateA - dateB;
+    })
+    .slice(0, limit);
 
-      const isMusic =
-        category === 'music';
+  res.json(reels);
+});
 
-      const isMeme =
-        category === 'meme';
+app.get('/api/batches', (req, res) => {
+  const db = loadDb();
 
-      let background =
-        'white';
+  res.json(
+    [...db.batches].sort(
+      (a, b) =>
+        new Date(b.createdAt) -
+        new Date(a.createdAt)
+    )
+  );
+});
 
-      let textColor =
-        'black';
+app.get('/api/batch/random', (req, res) => {
+  const db = loadDb();
 
-      if (
-        isMusic ||
-        isMeme
-      ) {
+  const accountId =
+    req.query.accountId;
 
-        background =
-          'black';
+  const limit = Math.min(
+    Number(req.query.limit) || 10,
+    50
+  );
 
-        textColor =
-          'white';
-      }
+  if (!accountId) {
+    return res.status(400).json({
+      error: 'accountId is required.'
+    });
+  }
 
-      if (isMovie) {
+  const reels = db.reels
+    .filter(
+      (reel) =>
+        reel.accountId === accountId &&
+        !reel.used
+    )
+    .sort((a, b) => {
+      const dateA = a.publishedAt
+        ? new Date(a.publishedAt).getTime()
+        : Infinity;
 
-        background =
-          'white';
+      const dateB = b.publishedAt
+        ? new Date(b.publishedAt).getTime()
+        : Infinity;
 
-        textColor =
-          'black';
-      }
+      return dateA - dateB;
+    })
+    .slice(0, limit);
 
-      const safeText =
-        hook
-          .replace(
-            /\\/g,
-            '\\\\'
-          )
-          .replace(
-            /:/g,
-            '\\:'
-          )
-          .replace(
-            /'/g,
-            "\\'"
-          )
-          .replace(
-            /"/g,
-            '\\"'
-          )
-          .replace(
-            /\[/g,
-            '\\['
-          )
-          .replace(
-            /\]/g,
-            '\\]'
-          );
+  const batch = {
+    id: id(),
+    accountId,
+    reelIds: reels.map(
+      (reel) => reel.id
+    ),
+    createdAt:
+      new Date().toISOString()
+  };
 
-      const drawText =
-        `drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='${safeText}':fontcolor=${textColor}:fontsize=58:x=(w-text_w)/2:y=120:box=0`;
+  db.batches.push(batch);
+  saveDb(db);
 
-      await execFileAsync(
-        'ffmpeg',
-        [
+  res.json({
+    batch,
+    reels
+  });
+});
 
-          '-y',
+app.post('/api/reels/:id/analyze', async (req, res) => {
+  let workDir = null;
 
-          '-i',
-          inputPath,
+  try {
+    const db = loadDb();
 
-          '-filter_complex',
+    const reel = db.reels.find(
+      (item) => item.id === req.params.id
+    );
 
-          `[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=${background},${drawText}[v]`,
-
-          '-map',
-          '[v]',
-
-          '-map',
-          '0:a?',
-
-          '-c:v',
-          'libx264',
-
-          '-preset',
-          'veryfast',
-
-          '-crf',
-          '23',
-
-          '-c:a',
-          'aac',
-
-          '-b:a',
-          '128k',
-
-          '-movflags',
-          '+faststart',
-
-          outputPath
-
-        ],
-        {
-          timeout:
-            180000
-        }
-      );
-
-      job.status =
-        'completed';
-
-      job.outputPath =
-        outputPath;
-
-      job.previewUrl =
-        `/api/jobs/${jobId}/file`;
-
-      reel.used =
-        true;
-
-      reel.rendered =
-        true;
-
-      reel.renderedAt =
-        new Date().toISOString();
-
-      reel.selectedHook =
-        hook;
-
-      saveDb(db);
-
-      try {
-
-        fs.rmSync(
-          workDir,
-          {
-            recursive:
-              true,
-
-            force:
-              true
-          }
-        );
-
-      } catch (_) {}
-
-      res.json({
-
-        ok:
-          true,
-
-        job,
-
-        previewUrl:
-          `/api/jobs/${jobId}/file`
+    if (!reel) {
+      return res.status(404).json({
+        error: 'Reel not found.'
       });
+    }
 
-    } catch (error) {
-
-      console.error(
-        'Render failed:',
-        error
-      );
-
-      const db =
-        loadDb();
-
-      const job =
-        db.jobs.find(
-          item =>
-            String(
-              item.id
-            ) ===
-            String(
-              req.params.id
-            )
-        );
-
-      if (job) {
-
-        job.status =
-          'failed';
-
-        job.error =
-          error.message;
-
-        saveDb(db);
-      }
-
-      res.status(500).json({
-
+    if (!reel.videoUrl) {
+      return res.status(400).json({
         error:
-          error.message ||
-          'Render failed.'
+          'This Reel has no downloadable video URL.'
       });
+    }
+
+    if (!OPENROUTER_API_KEY) {
+      return res.status(500).json({
+        error:
+          'OPENROUTER_API_KEY is missing on Render.'
+      });
+    }
+
+    workDir = path.join(
+      '/tmp',
+      `clipper-ai-${id()}`
+    );
+
+    fs.mkdirSync(workDir, {
+      recursive: true
+    });
+
+    const videoPath = path.join(
+      workDir,
+      'reel.mp4'
+    );
+
+    console.log(
+      `Downloading Reel ${reel.id} for AI analysis`
+    );
+
+    await downloadFile(
+      reel.videoUrl,
+      videoPath
+    );
+
+    const framePaths =
+      await extractFrames(
+        videoPath,
+        workDir
+      );
+
+    console.log(
+      `Sending ${framePaths.length} frames to OpenRouter`
+    );
+
+    const result =
+      await analyzeWithOpenRouter(
+        framePaths,
+        reel
+      );
+
+    const analysis =
+      normalizeAiResult(result);
+
+    reel.analyzed = true;
+    reel.analysis = analysis;
+    reel.selectedHook =
+      analysis.hooks.find(Boolean) ||
+      null;
+    reel.aiCaption =
+      analysis.caption || null;
+
+    saveDb(db);
+
+    res.json({
+      ok: true,
+      reel
+    });
+  } catch (error) {
+    console.error(
+      'AI analysis error:',
+      error
+    );
+
+    res.status(500).json({
+      error:
+        error.message ||
+        'AI analysis failed.'
+    });
+  } finally {
+    if (workDir) {
+      try {
+        fs.rmSync(workDir, {
+          recursive: true,
+          force: true
+        });
+      } catch (_) {}
     }
   }
-);
+});
 
+app.post('/api/jobs/:id/render', async (req, res) => {
+  let jobId = null;
+  let workDir = null;
 
-/* =========================================================
-   RENDER FILE
-========================================================= */
+  try {
+    const db = loadDb();
 
-app.get(
-  '/api/jobs/:id/file',
-  (req, res) => {
+    const reel = db.reels.find(
+      (item) => item.id === req.params.id
+    );
 
-    const db =
-      loadDb();
-
-    const job =
-      db.jobs.find(
-        item =>
-          String(
-            item.id
-          ) ===
-          String(
-            req.params.id
-          )
-      );
-
-    if (!job) {
-
+    if (!reel) {
       return res.status(404).json({
-        error:
-          'Job not found.'
+        error: 'Reel not found.'
       });
     }
+
+    if (!reel.videoUrl) {
+      return res.status(400).json({
+        error:
+          'This Reel has no downloadable video URL.'
+      });
+    }
+
+    const hook = String(
+      req.body?.hook ||
+        reel.selectedHook ||
+        ''
+    ).trim();
+
+    if (!hook) {
+      return res.status(400).json({
+        error:
+          'A hook is required before rendering.'
+      });
+    }
+
+    const category =
+      String(
+        req.body?.category ||
+          'music'
+      ).trim();
+
+    jobId = id();
+
+    const job = {
+      id: jobId,
+      reelId: reel.id,
+      status: 'processing',
+      category,
+      hook,
+      outputPath: null,
+      previewUrl: null,
+      error: null,
+      createdAt:
+        new Date().toISOString(),
+      completedAt: null
+    };
+
+    db.jobs.push(job);
+    saveDb(db);
+
+    workDir = path.join(
+      '/tmp',
+      `clipper-render-${jobId}`
+    );
+
+    fs.mkdirSync(workDir, {
+      recursive: true
+    });
+
+    const inputPath = path.join(
+      workDir,
+      'input.mp4'
+    );
+
+    const outputPath = path.join(
+      RENDER_DIR,
+      `${safeFileName(jobId)}.mp4`
+    );
+
+    await downloadFile(
+      reel.videoUrl,
+      inputPath
+    );
+
+    let background = 'black';
+    let textColor = 'white';
 
     if (
-      !job.outputPath ||
-      !fs.existsSync(
-        job.outputPath
-      )
+      category === 'movie_tv'
     ) {
-
-      return res.status(404).json({
-        error:
-          'Rendered video is no longer available.'
-      });
+      background = 'white';
+      textColor = 'black';
     }
 
-    res.setHeader(
-      'Content-Type',
-      'video/mp4'
+    const escapedHook = hook
+      .replace(/\\/g, '\\\\')
+      .replace(/:/g, '\\:')
+      .replace(/'/g, "\\'")
+      .replace(/%/g, '\\%');
+
+    const filter =
+      `scale=1080:1920:force_original_aspect_ratio=decrease,` +
+      `pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=${background},` +
+      `drawtext=text='${escapedHook}':` +
+      `fontcolor=${textColor}:` +
+      `fontsize=58:` +
+      `font='Arial':` +
+      `x=(w-text_w)/2:` +
+      `y=150:` +
+      `box=1:` +
+      `boxcolor=${background}@0.85:` +
+      `boxborderw=24`;
+
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-i',
+        inputPath,
+        '-vf',
+        filter,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        outputPath
+      ],
+      {
+        timeout: 240000
+      }
     );
 
-    res.setHeader(
-      'Content-Disposition',
-      `inline; filename="clipper-${job.id}.mp4"`
-    );
-
-    fs.createReadStream(
-      job.outputPath
-    ).pipe(res);
-  }
-);
-
-
-/* =========================================================
-   JOB
-========================================================= */
-
-app.get(
-  '/api/jobs/:id',
-  (req, res) => {
-
-    const db =
-      loadDb();
-
-    const job =
-      db.jobs.find(
-        item =>
-          String(
-            item.id
-          ) ===
-          String(
-            req.params.id
-          )
+    if (
+      !fs.existsSync(outputPath)
+    ) {
+      throw new Error(
+        'FFmpeg finished but no output file was created.'
       );
-
-    if (!job) {
-
-      return res.status(404).json({
-        error:
-          'Job not found.'
-      });
     }
+
+    job.status = 'completed';
+    job.outputPath = outputPath;
+    job.previewUrl =
+      `/api/jobs/${jobId}/file`;
+    job.completedAt =
+      new Date().toISOString();
+
+    reel.used = true;
+    reel.rendered = true;
+    reel.renderedAt =
+      new Date().toISOString();
+    reel.selectedHook = hook;
+
+    saveDb(db);
 
     res.json({
+      ok: true,
       job
     });
-  }
-);
+  } catch (error) {
+    console.error(
+      'Render error:',
+      error
+    );
 
+    if (jobId) {
+      try {
+        const db = loadDb();
 
-/* =========================================================
-   BATCHES
-========================================================= */
+        const job = db.jobs.find(
+          (item) =>
+            item.id === jobId
+        );
 
-app.get(
-  '/api/batches',
-  (req, res) => {
+        if (job) {
+          job.status = 'failed';
+          job.error =
+            error.message ||
+            'Render failed.';
+          job.completedAt =
+            new Date().toISOString();
 
-    const db =
-      loadDb();
-
-    res.json({
-      batches:
-        db.batches
-    });
-  }
-);
-
-
-app.get(
-  '/api/batches/:id',
-  (req, res) => {
-
-    const db =
-      loadDb();
-
-    const batch =
-      db.batches.find(
-        item =>
-          String(
-            item.id
-          ) ===
-          String(
-            req.params.id
-          )
-      );
-
-    if (!batch) {
-
-      return res.status(404).json({
-        error:
-          'Batch not found.'
-      });
+          saveDb(db);
+        }
+      } catch (dbError) {
+        console.error(
+          'Could not update failed job:',
+          dbError.message
+        );
+      }
     }
 
-    const reels =
-      batch.reelIds
-        .map(
-          id =>
-            db.reels.find(
-              reel =>
-                String(
-                  reel.id
-                ) ===
-                String(id)
-            )
-        )
-        .filter(Boolean);
+    res.status(500).json({
+      error:
+        error.message ||
+        'Render failed.'
+    });
+  } finally {
+    if (workDir) {
+      try {
+        fs.rmSync(workDir, {
+          recursive: true,
+          force: true
+        });
+      } catch (_) {}
+    }
+  }
+});
 
-    res.json({
+app.get('/api/jobs/:id', (req, res) => {
+  const db = loadDb();
 
-      batch,
+  const job = db.jobs.find(
+    (item) => item.id === req.params.id
+  );
 
-      reels
+  if (!job) {
+    return res.status(404).json({
+      error: 'Job not found.'
     });
   }
-);
 
+  res.json(job);
+});
 
-/* =========================================================
-   START SERVER
-========================================================= */
+app.get('/api/jobs/:id/file', (req, res) => {
+  const db = loadDb();
 
-app.listen(
-  PORT,
-  () => {
+  const job = db.jobs.find(
+    (item) => item.id === req.params.id
+  );
 
-    console.log(
-      `Clipper backend v1.4 listening on port ${PORT}`
-    );
-
-    console.log(
-      'APIFY_TOKEN:',
-      APIFY_TOKEN
-        ? 'configured'
-        : 'missing'
-    );
-
-    console.log(
-      'OPENROUTER_API_KEY:',
-      OPENROUTER_API_KEY
-        ? 'configured'
-        : 'missing'
-    );
+  if (!job || !job.outputPath) {
+    return res.status(404).json({
+      error: 'Rendered file not found.'
+    });
   }
-);
+
+  if (
+    !fs.existsSync(job.outputPath)
+  ) {
+    return res.status(404).json({
+      error:
+        'Rendered file no longer exists.'
+    });
+  }
+
+  res.download(
+    job.outputPath,
+    'clipper-reel.mp4'
+  );
+});
+
+app.listen(PORT, () => {
+  console.log(
+    `Clipper backend v${VERSION} running on port ${PORT}`
+  );
+
+  console.log(
+    `OpenRouter model: ${OPENROUTER_MODEL}`
+  );
+
+  console.log(
+    `Apify posts per profile: ${APIFY_POSTS_PER_PROFILE}`
+  );
+});
