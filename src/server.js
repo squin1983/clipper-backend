@@ -20,23 +20,31 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0';
+const VERSION = '2.0.1';
 
 /*
  * ========================================
  * APIFY
  * ========================================
  *
- * V2.0 uses cursor-based pagination.
+ * V2.0.1 uses cursor-based pagination.
  *
  * Actor:
  * seemuapps~instagram-posts-scraper
  *
- * Mode:
- * clips = Reels Only
+ * IMPORTANT:
+ * The Actor accepts:
+ *
+ *   mode = "all"
+ *   mode = "reels"
+ *
+ * For Clipper we use:
+ *
+ *   mode = "reels"
  *
  * Pagination:
- * NEXT_PAGE_ID -> pageId
+ *
+ *   NEXT_PAGE_ID -> pageId
  */
 
 const APIFY_TOKEN =
@@ -44,20 +52,27 @@ const APIFY_TOKEN =
 
 /*
  * IMPORTANT:
- * We intentionally use the new cursor-based
- * Actor here.
+ * We intentionally hardcode the new
+ * cursor-based Actor.
  *
- * This does NOT use the old
- * scrapers_lat actor.
+ * This prevents an old Render environment
+ * variable from accidentally switching us
+ * back to the previous Actor.
  */
 const APIFY_ACTOR =
   'seemuapps~instagram-posts-scraper';
 
 /*
- * We fetch 20 Reels per Sync.
+ * Exact mode accepted by the Actor.
+ */
+const APIFY_MODE =
+  'reels';
+
+/*
+ * Fetch 20 Reels per Sync.
  *
- * This gives us a useful batch while keeping
- * Apify usage controlled.
+ * Maximum allowed by our Clipper logic:
+ * 30.
  */
 const APIFY_BATCH_SIZE = Math.min(
   Math.max(
@@ -658,6 +673,8 @@ function getTimestamp(item) {
 
       item.taken_at,
 
+      item.takenAtTimestamp,
+
       item.timestamp,
 
       item.publishedAt,
@@ -765,11 +782,9 @@ async function getApifyNextPageId(
   keyValueStoreId
 ) {
   if (!keyValueStoreId) {
-    console.warn(
-      'Apify did not return defaultKeyValueStoreId.'
+    throw new Error(
+      'Apify did not return defaultKeyValueStoreId, so Clipper cannot retrieve NEXT_PAGE_ID.'
     );
-
-    return null;
   }
 
   const url =
@@ -790,10 +805,6 @@ async function getApifyNextPageId(
         }
       );
 
-    /*
-     * The record may be returned as a
-     * JSON string, object, null, etc.
-     */
     if (
       value === null ||
       value === undefined
@@ -837,6 +848,13 @@ async function getApifyNextPageId(
         return value.pageId;
       }
 
+      if (
+        typeof value.nextPageId ===
+        'string'
+      ) {
+        return value.nextPageId;
+      }
+
       return null;
     }
 
@@ -844,10 +862,6 @@ async function getApifyNextPageId(
       value
     );
   } catch (error) {
-    /*
-     * If NEXT_PAGE_ID does not exist,
-     * treat it as exhausted.
-     */
     if (
       String(
         error.message ||
@@ -885,22 +899,19 @@ async function runApify(
   }
 
   /*
-   * IMPORTANT:
-   *
-   * This is the exact architecture of
-   * the new Actor:
+   * EXACT INPUT EXPECTED BY THE ACTOR:
    *
    * username
-   * mode = clips
+   * mode = "reels"
    * maxPosts
-   * pageId = NEXT_PAGE_ID
+   * pageId (only when continuing)
    */
   const input = {
     username:
       normalizedUsername,
 
     mode:
-      'clips',
+      APIFY_MODE,
 
     maxPosts:
       Math.min(
@@ -931,6 +942,14 @@ async function runApify(
 
   console.log(
     `Actor: ${APIFY_ACTOR}`
+  );
+
+  console.log(
+    `Mode: ${APIFY_MODE}`
+  );
+
+  console.log(
+    `Batch size: ${input.maxPosts}`
   );
 
   console.log(
@@ -1142,8 +1161,9 @@ async function runApify(
   }
 
   /*
-   * Get the cursor AFTER the run has
-   * completed and the actor has written it.
+   * IMPORTANT:
+   * Retrieve the cursor only after the
+   * actor has completed.
    */
   const nextPageId =
     await getApifyNextPageId(
@@ -1203,10 +1223,6 @@ function saveApifyItems(
   let updated = 0;
   let duplicates = 0;
 
-  /*
-   * Keep track of items seen inside the
-   * current Apify response as well.
-   */
   const seenThisRun =
     new Set();
 
@@ -1227,9 +1243,11 @@ function saveApifyItems(
     }
 
     /*
-     * The Actor supports both posts and
-     * Reels structurally. We requested
-     * clips mode, but verify anyway.
+     * Actor was requested in Reels mode.
+     *
+     * If productType exists, make sure
+     * we do not accidentally store normal
+     * photo posts.
      */
     if (
       item.productType &&
@@ -1267,10 +1285,6 @@ function saveApifyItems(
         )
       );
 
-    /*
-     * Deduplicate inside the same
-     * Apify response.
-     */
     const runKey =
       shortcode ||
       externalId ||
@@ -1347,10 +1361,6 @@ function saveApifyItems(
 
       publishedAt,
 
-      /*
-       * Keep useful engagement data
-       * for future Clipper features.
-       */
       likeCount:
         firstNonEmpty(
           item.likeCount,
@@ -1390,9 +1400,8 @@ function saveApifyItems(
 
     if (existing) {
       /*
-       * IMPORTANT:
-       * Never destroy existing AI analysis,
-       * selected hook or render.
+       * Preserve AI analysis,
+       * selected hook and render.
        */
       const existingAnalysis =
         existing.analysis;
@@ -1481,7 +1490,7 @@ app.get(
         'cursor-pagination',
 
       apifyMode:
-        'clips',
+        APIFY_MODE,
 
       time:
         nowIso()
@@ -1530,6 +1539,52 @@ app.post(
         );
 
       if (existing) {
+        /*
+         * Migration safety for accounts
+         * created before V2.0.
+         */
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'apifyPageId'
+          )
+        ) {
+          existing.apifyPageId =
+            null;
+        }
+
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'apifyExhausted'
+          )
+        ) {
+          existing.apifyExhausted =
+            false;
+        }
+
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'apifyLastRunId'
+          )
+        ) {
+          existing.apifyLastRunId =
+            null;
+        }
+
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'apifyLastSyncAt'
+          )
+        ) {
+          existing.apifyLastSyncAt =
+            null;
+        }
+
+        saveDb(db);
+
         return res.json(
           existing
         );
@@ -1547,9 +1602,6 @@ app.post(
         updatedAt:
           nowIso(),
 
-        /*
-         * V2.0 pagination state.
-         */
         apifyPageId:
           null,
 
@@ -1644,26 +1696,6 @@ app.delete(
  * ========================================
  * CURSOR-BASED INSTAGRAM SYNC
  * ========================================
- *
- * FIRST SYNC:
- *
- *   pageId = null
- *   -> newest page of Reels
- *   -> save NEXT_PAGE_ID
- *
- * SECOND SYNC:
- *
- *   pageId = saved NEXT_PAGE_ID
- *   -> next page
- *   -> save new NEXT_PAGE_ID
- *
- * THIRD SYNC:
- *
- *   same again
- *
- * When NEXT_PAGE_ID = null:
- *
- *   -> profile history exhausted
  */
 
 app.post(
@@ -1690,10 +1722,7 @@ app.post(
       }
 
       /*
-       * Migration safety:
-       *
-       * Accounts created in V1.9 do not
-       * have these properties.
+       * Migration safety for old accounts.
        */
       if (
         !Object.prototype.hasOwnProperty.call(
@@ -1740,12 +1769,13 @@ app.post(
       );
 
       console.log(
-        `Starting V2.0 cursor sync for @${account.username}`
+        `Starting V2.0.1 cursor sync for @${account.username}`
       );
 
       /*
-       * If the profile was previously
-       * exhausted, don't waste an Apify run.
+       * If history is already exhausted,
+       * don't waste another Apify run unless
+       * force=true was explicitly requested.
        */
       if (
         account.apifyExhausted &&
@@ -1810,6 +1840,12 @@ app.post(
                   .publishedAt
               : null,
 
+          hasNextPage:
+            false,
+
+          exhausted:
+            true,
+
           message:
             'Instagram history is already exhausted for this account.',
 
@@ -1849,7 +1885,7 @@ app.post(
         [];
 
       console.log(
-        `V2.0 received ${items.length} raw Apify items.`
+        `V2.0.1 received ${items.length} raw Apify items.`
       );
 
       const result =
@@ -1859,7 +1895,8 @@ app.post(
         );
 
       /*
-       * Save the NEW cursor only after the
+       * IMPORTANT:
+       * Save the new cursor only after the
        * dataset has been successfully processed.
        */
       account.apifyPageId =
@@ -1913,7 +1950,7 @@ app.post(
         );
 
       console.log(
-        `V2.0 sync complete for @${account.username}: added=${result.added}, updated=${result.updated}, duplicates=${result.duplicates}, raw=${items.length}, total=${accountReels.length}, hasNext=${Boolean(
+        `V2.0.1 sync complete for @${account.username}: added=${result.added}, updated=${result.updated}, duplicates=${result.duplicates}, raw=${items.length}, total=${accountReels.length}, hasNext=${Boolean(
           account.apifyPageId
         )}`
       );
@@ -1970,7 +2007,7 @@ app.post(
       });
     } catch (error) {
       console.error(
-        'Instagram V2.0 sync error:',
+        'Instagram V2.0.1 sync error:',
         error
       );
 
@@ -1989,14 +2026,6 @@ app.post(
  * ========================================
  * FORCE RESET PAGINATION
  * ========================================
- *
- * Useful if a cursor ever becomes invalid.
- *
- * This does NOT delete Reels.
- *
- * It only tells Clipper to start the
- * account pagination again from the
- * newest Reels.
  */
 
 app.post(
@@ -3331,7 +3360,7 @@ app.listen(
     );
 
     console.log(
-      'Apify mode: clips (Reels Only)'
+      `Apify mode: ${APIFY_MODE}`
     );
 
     console.log(
