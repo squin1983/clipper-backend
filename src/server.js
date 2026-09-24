@@ -1553,6 +1553,17 @@ app.post(
           });
       }
 
+      const requestedStyle =
+        String(
+          req.body?.styleProfile ||
+            'movie_tv'
+        ).trim();
+
+      const styleProfile =
+        requestedStyle === 'music'
+          ? 'music'
+          : 'movie_tv';
+
       const existing =
         db.accounts.find(
           (account) =>
@@ -1605,6 +1616,16 @@ app.post(
             null;
         }
 
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'styleProfile'
+          )
+        ) {
+          existing.styleProfile =
+            styleProfile;
+        }
+
         saveDb(db);
 
         return res.json(
@@ -1623,6 +1644,8 @@ app.post(
 
         updatedAt:
           nowIso(),
+
+        styleProfile,
 
         apifyPageId:
           null,
