@@ -3021,10 +3021,19 @@ app.post(
             reel.analysis?.hook ||
             '';
 
-          const hookWords =
+          /*
+           * FFmpeg's drawtext font does not reliably support emoji,
+           * so remove unsupported Unicode symbols to avoid square glyphs.
+           */
+          const safeHook =
             String(hook)
-              .trim()
-              .split(/\s+/)
+              .replace(/[\\u{1F000}-\\u{1FAFF}\\u{2600}-\\u{27BF}]/gu, '')
+              .replace(/\\s{2,}/g, ' ')
+              .trim();
+
+          const hookWords =
+            safeHook
+              .split(/\\s+/)
               .filter(Boolean);
 
           const hookLines = [];
@@ -3079,10 +3088,10 @@ app.post(
               'crop=1080:1920',
               'setsar=1',
               hookLines.length
-                ? 'drawbox=x=0:y=0:w=iw:h=430:color=black@0.82:t=fill'
+                ? 'drawbox=x=0:y=0:w=iw:h=760:color=black@0.90:t=fill'
                 : null,
               hookLines.length
-                ? `drawtext=textfile='${escapedHookTextPath}':fontcolor=white:fontsize=${hookFontSize}:line_spacing=12:borderw=4:bordercolor=black:x=(w-text_w)/2:y=105:box=1:boxcolor=black@0.35:boxborderw=18`
+                ? `drawtext=textfile='${escapedHookTextPath}':fontcolor=white:fontsize=${hookFontSize}:line_spacing=12:borderw=4:bordercolor=black:x=(w-text_w)/2:y=180:box=1:boxcolor=black@0.35:boxborderw=18`
                 : null
             ]
               .filter(Boolean)
