@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.4';
+const VERSION = '2.0.5';
 
 /*
  * ========================================
@@ -3099,7 +3099,6 @@ app.post(
            */
           const safeHook =
             String(hook)
-              .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
               .replace(/\s{2,}/g, ' ')
               .trim();
 
@@ -3108,28 +3107,44 @@ app.post(
               .split(/\s+/)
               .filter(Boolean);
 
+          /*
+           * Keep the hook to a maximum of two visual lines.
+           * We split around the middle instead of creating a tall
+           * three/four-line block.
+           */
           const hookLines = [];
-          let currentLine = '';
 
-          for (const word of hookWords) {
-            const candidate =
-              currentLine
-                ? `${currentLine} ${word}`
-                : word;
+          if (hookWords.length) {
+            let bestSplit = hookWords.length;
+            let bestDiff = Infinity;
 
-            if (
-              currentLine &&
-              candidate.length > 24
-            ) {
-              hookLines.push(currentLine);
-              currentLine = word;
-            } else {
-              currentLine = candidate;
+            for (let split = 1; split < hookWords.length; split++) {
+              const left = hookWords.slice(0, split).join(' ');
+              const right = hookWords.slice(split).join(' ');
+              const diff = Math.abs(left.length - right.length);
+
+              if (
+                left.length <= 30 &&
+                right.length <= 30 &&
+                diff < bestDiff
+              ) {
+                bestSplit = split;
+                bestDiff = diff;
+              }
             }
-          }
 
-          if (currentLine) {
-            hookLines.push(currentLine);
+            if (bestSplit < hookWords.length) {
+              hookLines.push(
+                hookWords.slice(0, bestSplit).join(' ')
+              );
+              hookLines.push(
+                hookWords.slice(bestSplit).join(' ')
+              );
+            } else {
+              hookLines.push(
+                hookWords.join(' ')
+              );
+            }
           }
 
           const hookTextPath =
@@ -3147,23 +3162,37 @@ app.post(
               .replace(/:/g, '\\:')
               .replace(/'/g, "\\'");
 
-          const hookFontSize =
-            hookLines.length >= 4
-              ? 40
-              : hookLines.length >= 3
-                ? 46
-                : 52;
+          const hookMaxLineLength =
+            Math.max(
+              ...hookLines.map(
+                (line) => line.length
+              ),
+              0
+            );
 
+          const hookFontSize =
+            hookMaxLineLength > 26
+              ? 46
+              : 56;
+
+          /*
+           * Instagram Reel source is normally horizontal.
+           * Fit it inside the 9:16 canvas instead of cropping the sides.
+           *
+           * The original source hook sits near the top of the horizontal
+           * video. Cover only that area with an opaque black strip so the
+           * original hook cannot bleed through.
+           */
           const filter =
             [
-              'scale=1080:1920:force_original_aspect_ratio=increase',
-              'crop=1080:1920',
+              'scale=1080:1920:force_original_aspect_ratio=decrease',
+              'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
               'setsar=1',
               hookLines.length
-                ? 'drawbox=x=0:y=0:w=iw:h=760:color=black@0.90:t=fill'
+                ? 'drawbox=x=0:y=650:w=iw:h=300:color=black@1.0:t=fill'
                 : null,
               hookLines.length
-                ? `drawtext=textfile='${escapedHookTextPath}':fontcolor=white:fontsize=${hookFontSize}:line_spacing=12:borderw=4:bordercolor=black:x=(w-text_w)/2:y=180:box=1:boxcolor=black@0.35:boxborderw=18`
+                ? `drawtext=font='DejaVu Sans:style=Bold':textfile='${escapedHookTextPath}':fontcolor=white:alpha=1:fontsize=${hookFontSize}:line_spacing=8:borderw=5:bordercolor=black:x=(w-text_w)/2:y=700`
                 : null
             ]
               .filter(Boolean)
