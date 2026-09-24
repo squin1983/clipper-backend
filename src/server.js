@@ -3021,48 +3021,71 @@ app.post(
             reel.analysis?.hook ||
             '';
 
-          const escapedHook =
+          const hookWords =
             String(hook)
-              .replace(
-                /\\/g,
-                '\\\\'
-              )
-              .replace(
-                /'/g,
-                "\\'"
-              )
-              .replace(
-                /:/g,
-                '\\:'
-              )
-              .replace(
-                /\[/g,
-                '\\['
-              )
-              .replace(
-                /\]/g,
-                '\\]'
-              )
-              .replace(
-                /%/g,
-                '\\%'
-              );
+              .trim()
+              .split(/\s+/)
+              .filter(Boolean);
+
+          const hookLines = [];
+          let currentLine = '';
+
+          for (const word of hookWords) {
+            const candidate =
+              currentLine
+                ? `${currentLine} ${word}`
+                : word;
+
+            if (
+              currentLine &&
+              candidate.length > 24
+            ) {
+              hookLines.push(currentLine);
+              currentLine = word;
+            } else {
+              currentLine = candidate;
+            }
+          }
+
+          if (currentLine) {
+            hookLines.push(currentLine);
+          }
+
+          const hookTextPath =
+            path.join(workDir, 'hook.txt');
+
+          fs.writeFileSync(
+            hookTextPath,
+            hookLines.join('\n'),
+            'utf8'
+          );
+
+          const escapedHookTextPath =
+            hookTextPath
+              .replace(/\\/g, '\\\\')
+              .replace(/:/g, '\\:')
+              .replace(/'/g, "\\'");
+
+          const hookFontSize =
+            hookLines.length >= 4
+              ? 40
+              : hookLines.length >= 3
+                ? 46
+                : 52;
 
           const filter =
             [
               'scale=1080:1920:force_original_aspect_ratio=increase',
-
               'crop=1080:1920',
-
               'setsar=1',
-
-              escapedHook
-                ? `drawtext=text='${escapedHook}':fontcolor=white:fontsize=58:borderw=4:bordercolor=black:x=(w-text_w)/2:y=140:box=1:boxcolor=black@0.35:boxborderw=20`
+              hookLines.length
+                ? 'drawbox=x=0:y=0:w=iw:h=430:color=black@0.82:t=fill'
+                : null,
+              hookLines.length
+                ? `drawtext=textfile='${escapedHookTextPath}':fontcolor=white:fontsize=${hookFontSize}:line_spacing=12:borderw=4:bordercolor=black:x=(w-text_w)/2:y=105:box=1:boxcolor=black@0.35:boxborderw=18`
                 : null
             ]
-              .filter(
-                Boolean
-              )
+              .filter(Boolean)
               .join(',');
 
           console.log(
