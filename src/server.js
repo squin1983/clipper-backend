@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.5';
+const VERSION = '2.0.6';
 
 /*
  * ========================================
@@ -2636,7 +2636,7 @@ The JSON must contain exactly these fields:
 
 {
   "summary": "short factual summary of what happens",
-  "hook": "the strongest short hook for a Reel",
+  "hook": "the strongest short viral hook for the Reel",
   "hookAlternatives": [
     "alternative hook 1",
     "alternative hook 2",
@@ -2656,12 +2656,25 @@ The JSON must contain exactly these fields:
   ]
 }
 
-Rules:
+Rules for hooks:
 - English only.
+- Hooks must be VERY short: ideally 3-8 words and NEVER more than 10 words.
+- Prefer a single punchy phrase over a descriptive sentence.
+- Maximum about 45 characters when possible.
+- Write like modern Gen-Z Instagram/Reels on-screen text: punchy, conversational, curious, slightly chaotic or reaction-driven when appropriate.
+- Create curiosity without falsely hiding the actual context.
+- Focus on the funniest, most surprising, awkward, iconic, controversial, or unexpected moment actually visible in the Reel.
+- Use 1-2 relevant emojis when they genuinely fit the moment. Do not add random emojis.
+- Avoid long names, explanations, dates, locations, and unnecessary context unless essential to the joke.
+- Avoid generic filler such as "This is crazy", "You won't believe this", or "Wait for it".
+- Do not use quotation marks around hooks.
+- Do not end hooks with a period.
+- Each hook alternative must be meaningfully different, not the same sentence rearranged.
+- The hook must be suitable for large bold on-screen text and should normally fit into 1-2 lines.
+
+Rules for the other fields:
 - Do not invent facts that are not visible or stated.
-- Keep hooks short.
 - Make on-screen text suitable for a Reel.
-- Do not use quotation marks around the hook.
 - Avoid generic filler.
 - Focus on the actual moment shown.
 
