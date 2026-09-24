@@ -1203,7 +1203,7 @@ async function runApify(
     keyValueStoreId
   };
 }
-          }`
+ );
     } catch (error) {
       console.error(
         'Delete account error:',
