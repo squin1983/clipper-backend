@@ -3027,7 +3027,7 @@ app.post(
            */
           const safeHook =
             String(hook)
-              .replace(/[\\u{1F000}-\\u{1FAFF}\\u{2600}-\\u{27BF}]/gu, '')
+              .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
               .replace(/\\s{2,}/g, ' ')
               .trim();
 
