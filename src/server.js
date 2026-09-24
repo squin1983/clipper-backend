@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.2';
+const VERSION = '2.0.3';
 
 /*
  * ========================================
@@ -3100,12 +3100,12 @@ app.post(
           const safeHook =
             String(hook)
               .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
-              .replace(/\\s{2,}/g, ' ')
+              .replace(/\s{2,}/g, ' ')
               .trim();
 
           const hookWords =
             safeHook
-              .split(/\\s+/)
+              .split(/\s+/)
               .filter(Boolean);
 
           const hookLines = [];
@@ -3183,6 +3183,9 @@ app.post(
 
               '-vf',
               filter,
+
+              '-threads',
+              '2',
 
               '-c:v',
               'libx264',
