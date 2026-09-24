@@ -1724,6 +1724,284 @@ app.post(
   }
 );
 
+app.post(
+  '/api/accounts/:id/generate-style-dna',
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const account = db.accounts.find(
+        (item) => item.id === req.params.id
+      );
+
+      if (!account) {
+        return res
+          .status(404)
+          .json({
+            error: 'Instagram account not found.'
+          });
+      }
+
+      if (!OPENROUTER_API_KEY) {
+        return res
+          .status(500)
+          .json({
+            error: 'OPENROUTER_API_KEY is not configured on Render.'
+          });
+      }
+
+      const accountReels = db.reels
+        .filter(
+          (reel) =>
+            reel.accountId === account.id
+        )
+        .sort(
+          (a, b) => {
+            const aDate = a.publishedAt
+              ? new Date(a.publishedAt).getTime()
+              : 0;
+            const bDate = b.publishedAt
+              ? new Date(b.publishedAt).getTime()
+              : 0;
+            return bDate - aDate;
+          }
+        );
+
+      if (!accountReels.length) {
+        return res
+          .status(400)
+          .json({
+            error: 'No Reels have been synced for this account yet. Sync the Instagram account first.'
+          });
+      }
+
+      /*
+       * Prefer existing AI hooks when available because they represent
+       * the actual on-screen hook style. Otherwise use the original
+       * Instagram caption stored by Apify.
+       */
+      const examples = [];
+
+      for (const reel of accountReels) {
+        const hook =
+          reel.analysis?.hook ||
+          reel.selectedHook ||
+          '';
+
+        const caption =
+          reel.caption ||
+          '';
+
+        const candidate =
+          String(hook || caption)
+            .replace(/\\s+/g, ' ')
+            .trim();
+
+        if (
+          candidate &&
+          !examples.includes(candidate)
+        ) {
+          examples.push(candidate.slice(0, 300));
+        }
+
+        if (examples.length >= 10) {
+          break;
+        }
+      }
+
+      if (!examples.length) {
+        return res
+          .status(400)
+          .json({
+            error: 'The synced Reels do not contain usable captions or analyzed hooks yet.'
+          });
+      }
+
+      const sourceText = examples
+        .map(
+          (example, index) =>
+            `${index + 1}. ${example}`
+        )
+        .join('\\n');
+
+      const stylePrompt = `You are analyzing the established writing style of an Instagram account.
+
+ACCOUNT STYLE:
+${account.styleProfile === 'music'
+  ? 'MUSIC'
+  : 'MOVIE / TV'}
+
+Below are real hooks or Instagram captions taken from this account. They are STYLE EVIDENCE, not facts to reuse.
+
+REAL EXAMPLES:
+${sourceText}
+
+Create a concise Style DNA for this account.
+
+Return ONLY valid JSON with exactly these fields:
+{
+  "styleRules": "5-10 concise rules describing the recurring writing style",
+  "styleExamples": ["example 1", "example 2", "example 3", "example 4", "example 5"]
+}
+
+Rules:
+- Base every rule only on patterns actually visible in the examples.
+- Describe tone, sentence rhythm, wording, capitalization, punctuation, emoji use, curiosity, humor, attitude, length, and formatting when those patterns are present.
+- Do not invent a style that is not supported by the examples.
+- Do not copy or rewrite the examples into fake new examples.
+- styleExamples MUST contain only exact examples from the supplied REAL EXAMPLES.
+- Keep styleRules practical so another AI can follow them when creating new Reel hooks.
+- Keep the final rules concise.`;
+
+      const response =
+        await requestJson(
+          'https://openrouter.ai/api/v1/chat/completions',
+          {
+            method: 'POST',
+
+            headers: {
+              'Content-Type': 'application/json',
+
+              Authorization:
+                `Bearer ${OPENROUTER_API_KEY}`,
+
+              'HTTP-Referer':
+                'https://squin1983.github.io/Clipper/',
+
+              'X-Title':
+                'Clipper'
+            },
+
+            body:
+              JSON.stringify({
+                model:
+                  OPENROUTER_MODEL,
+
+                messages: [
+                  {
+                    role: 'user',
+
+                    content:
+                      stylePrompt
+                  }
+                ],
+
+                response_format: {
+                  type: 'json_object'
+                }
+              }),
+
+            timeout:
+              120000
+          }
+        );
+
+      const rawContent =
+        response
+          ?.choices?.[0]
+          ?.message
+          ?.content;
+
+      if (!rawContent) {
+        throw new Error(
+          'OpenRouter returned no Style DNA content.'
+        );
+      }
+
+      let parsed =
+        safeJsonParse(
+          rawContent
+        );
+
+      if (!parsed) {
+        const match =
+          rawContent.match(
+            /\\{[\\s\\S]*\\}/
+          );
+
+        if (match) {
+          parsed =
+            safeJsonParse(
+              match[0]
+            );
+        }
+      }
+
+      if (!parsed) {
+        throw new Error(
+          'OpenRouter returned invalid Style DNA JSON.'
+        );
+      }
+
+      const styleRules =
+        String(
+          parsed.styleRules || ''
+        )
+          .trim()
+          .slice(0, 5000);
+
+      const returnedExamples =
+        Array.isArray(
+          parsed.styleExamples
+        )
+          ? parsed.styleExamples
+              .map(
+                (item) =>
+                  String(item || '')
+                    .trim()
+              )
+              .filter(Boolean)
+          : [];
+
+      const styleExamples =
+        returnedExamples
+          .filter(
+            (example) =>
+              examples.includes(
+                example
+              )
+          )
+          .slice(0, 10);
+
+      account.styleRules =
+        styleRules;
+
+      account.styleExamples =
+        styleExamples.length
+          ? styleExamples
+          : examples.slice(0, 10);
+
+      account.updatedAt =
+        nowIso();
+
+      saveDb(db);
+
+      res.json({
+        ok: true,
+
+        account,
+
+        sourceReels:
+          accountReels.length
+      });
+    } catch (error) {
+      console.error(
+        'Generate Style DNA error:',
+        error
+      );
+
+      res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            'Style DNA generation failed.'
+        });
+    }
+  }
+);
+
 app.put(
   '/api/accounts/:id',
   (req, res) => {
