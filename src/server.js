@@ -2160,6 +2160,78 @@ app.get(
   }
 );
 
+app.post(
+  '/api/reels/restore',
+  (req, res) => {
+    try {
+      const reel = req.body?.reel;
+      const account = req.body?.account;
+
+      if (!reel?.id || !reel?.videoUrl) {
+        return res.status(400).json({
+          error: 'A Reel with id and videoUrl is required.'
+        });
+      }
+
+      if (!account?.id || !account?.username) {
+        return res.status(400).json({
+          error: 'The Reel account is required.'
+        });
+      }
+
+      let backendAccount = db.accounts.find(
+        (item) => item.id === account.id
+      );
+
+      if (!backendAccount) {
+        backendAccount = {
+          ...account,
+          createdAt: account.createdAt || nowIso(),
+          updatedAt: nowIso()
+        };
+        db.accounts.push(backendAccount);
+      }
+
+      let existing = db.reels.find(
+        (item) => item.id === reel.id
+      );
+
+      if (!existing && reel.shortcode) {
+        existing = db.reels.find(
+          (item) =>
+            item.accountId === backendAccount.id &&
+            item.shortcode === reel.shortcode
+        );
+      }
+
+      const restored = {
+        ...reel,
+        id: reel.id,
+        accountId: backendAccount.id,
+        updatedAt: nowIso()
+      };
+
+      if (existing) {
+        Object.assign(existing, restored);
+      } else {
+        db.reels.push(restored);
+      }
+
+      saveDb(db);
+
+      res.json({
+        ok: true,
+        reel: existing || restored
+      });
+    } catch (error) {
+      console.error('Restore Reel error:', error);
+      res.status(500).json({
+        error: error.message
+      });
+    }
+  }
+);
+
 app.get(
   '/api/accounts/:id/reels',
   (req, res) => {
