@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.3';
+const VERSION = '2.0.4';
 
 /*
  * ========================================
@@ -3191,10 +3191,10 @@ app.post(
               'libx264',
 
               '-preset',
-              'veryfast',
+              'ultrafast',
 
               '-crf',
-              '23',
+              '25',
 
               '-c:a',
               'aac',
