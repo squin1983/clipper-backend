@@ -2600,7 +2600,8 @@ function imageToDataUrl(
 
 async function analyzeVideoWithAI(
   videoPath,
-  caption
+  caption,
+  styleProfile = 'movie_tv'
 ) {
   if (
     !OPENROUTER_API_KEY
@@ -2652,6 +2653,10 @@ async function analyzeVideoWithAI(
 
     const prompt = `
 You are analyzing an Instagram Reel for a social-media remix workflow.
+
+ACCOUNT CONTENT STYLE:
+${styleProfile === 'music' ? 'MUSIC — write hooks/captions in the established style of the Music Instagram account.' : 'MOVIE / TV — write hooks/captions in the established style of the Movie / TV Instagram account.'}
+The selected account style is a hard requirement. Do not mix the two account styles.
 
 Return ONLY valid JSON.
 
@@ -2879,10 +2884,22 @@ app.post(
         `Analyzing Reel ${reel.id} with OpenRouter`
       );
 
+      const account =
+        db.accounts.find(
+          (item) =>
+            item.id === reel.accountId
+        );
+
+      const styleProfile =
+        account?.styleProfile === 'music'
+          ? 'music'
+          : 'movie_tv';
+
       const analysis =
         await analyzeVideoWithAI(
           videoPath,
-          reel.caption
+          reel.caption,
+          styleProfile
         );
 
       reel.analysis =
