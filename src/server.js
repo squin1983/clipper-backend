@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.6';
+const VERSION = '2.0.7';
 
 /*
  * ========================================
@@ -2658,18 +2658,21 @@ The JSON must contain exactly these fields:
 
 Rules for hooks:
 - English only.
-- Hooks must be VERY short: ideally 3-8 words and NEVER more than 10 words.
-- Prefer a single punchy phrase over a descriptive sentence.
-- Maximum about 45 characters when possible.
-- Write like modern Gen-Z Instagram/Reels on-screen text: punchy, conversational, curious, slightly chaotic or reaction-driven when appropriate.
-- Create curiosity without falsely hiding the actual context.
+- Every hook MUST be at least 5 words long. Prefer 6-9 words. NEVER use more than 10 words.
+- The hook MUST clearly make sense based on the actual video content. It must describe or react to a specific person, action, moment, reaction, situation, joke, twist, or relationship that is genuinely visible or clearly stated in the Reel.
+- Content relevance is more important than generic virality. Never invent context, motives, events, relationships, or details that are not visible or stated.
+- Write like modern Gen-Z Instagram/Reels on-screen text: punchy, conversational, curious, slightly chaotic or reaction-driven when appropriate, but still natural and understandable.
+- Prefer a concise, natural phrase or sentence with enough context to understand what the hook refers to.
+- Keep it short enough for large bold on-screen text, normally 1-2 lines. Aim for about 55 characters when possible, but NEVER sacrifice meaning just to hit a character limit.
+- Create curiosity from the actual content without falsely hiding or changing the context.
 - Focus on the funniest, most surprising, awkward, iconic, controversial, or unexpected moment actually visible in the Reel.
-- Use 1-2 relevant emojis when they genuinely fit the moment. Do not add random emojis.
-- Avoid long names, explanations, dates, locations, and unnecessary context unless essential to the joke.
+- Use 1-2 relevant emojis when they genuinely fit the moment. Do not add random emojis or let emojis replace important words.
+- Avoid unnecessary long names, explanations, dates, locations, and background details unless they are essential to understanding the actual moment.
 - Avoid generic filler such as "This is crazy", "You won't believe this", or "Wait for it".
 - Do not use quotation marks around hooks.
 - Do not end hooks with a period.
-- Each hook alternative must be meaningfully different, not the same sentence rearranged.
+- Each hook alternative must be meaningfully different AND independently relevant to the actual Reel, not the same sentence rearranged.
+- The hook must make sense when read by itself and must be clearly connected to the Reel.
 - The hook must be suitable for large bold on-screen text and should normally fit into 1-2 lines.
 
 Rules for the other fields:
