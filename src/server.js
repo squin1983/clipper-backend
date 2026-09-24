@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.7';
+const VERSION = '2.0.8';
 
 /*
  * ========================================
@@ -1626,6 +1626,35 @@ app.post(
             styleProfile;
         }
 
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'styleRules'
+          )
+        ) {
+          existing.styleRules = '';
+        }
+
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            existing,
+            'styleExamples'
+          )
+        ) {
+          existing.styleExamples = [];
+        }
+
+        if (req.body?.styleRules !== undefined) {
+          existing.styleRules = String(req.body.styleRules || '').trim().slice(0, 5000);
+        }
+
+        if (Array.isArray(req.body?.styleExamples)) {
+          existing.styleExamples = req.body.styleExamples
+            .map((item) => String(item || '').trim())
+            .filter(Boolean)
+            .slice(0, 10);
+        }
+
         saveDb(db);
 
         return res.json(
@@ -1646,6 +1675,14 @@ app.post(
           nowIso(),
 
         styleProfile,
+
+        styleRules:
+          String(req.body?.styleRules || '').trim().slice(0, 5000),
+
+        styleExamples:
+          Array.isArray(req.body?.styleExamples)
+            ? req.body.styleExamples.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 10)
+            : [],
 
         apifyPageId:
           null,
@@ -1683,6 +1720,48 @@ app.post(
           error:
             error.message
         });
+    }
+  }
+);
+
+app.put(
+  '/api/accounts/:id',
+  (req, res) => {
+    try {
+      const account = db.accounts.find(
+        (item) => item.id === req.params.id
+      );
+
+      if (!account) {
+        return res.status(404).json({ error: 'Instagram account not found.' });
+      }
+
+      if (req.body?.styleProfile !== undefined) {
+        account.styleProfile =
+          String(req.body.styleProfile).trim() === 'music'
+            ? 'music'
+            : 'movie_tv';
+      }
+
+      if (req.body?.styleRules !== undefined) {
+        account.styleRules =
+          String(req.body.styleRules || '').trim().slice(0, 5000);
+      }
+
+      if (Array.isArray(req.body?.styleExamples)) {
+        account.styleExamples = req.body.styleExamples
+          .map((item) => String(item || '').trim())
+          .filter(Boolean)
+          .slice(0, 10);
+      }
+
+      account.updatedAt = nowIso();
+      saveDb(db);
+
+      res.json(account);
+    } catch (error) {
+      console.error('Update account error:', error);
+      res.status(500).json({ error: error.message });
     }
   }
 );
@@ -2601,7 +2680,9 @@ function imageToDataUrl(
 async function analyzeVideoWithAI(
   videoPath,
   caption,
-  styleProfile = 'movie_tv'
+  styleProfile = 'movie_tv',
+  styleRules = '',
+  styleExamples = []
 ) {
   if (
     !OPENROUTER_API_KEY
@@ -2657,6 +2738,13 @@ You are analyzing an Instagram Reel for a social-media remix workflow.
 ACCOUNT CONTENT STYLE:
 ${styleProfile === 'music' ? 'MUSIC — write hooks/captions in the established style of the Music Instagram account.' : 'MOVIE / TV — write hooks/captions in the established style of the Movie / TV Instagram account.'}
 The selected account style is a hard requirement. Do not mix the two account styles.
+
+STYLE DNA RULES:
+${styleRules || 'No custom Style DNA rules have been added yet. Follow the selected account style only.'}
+
+REAL EXAMPLES FROM THIS ACCOUNT:
+${Array.isArray(styleExamples) && styleExamples.length ? styleExamples.map((example, index) => `${index + 1}. ${example}`).join('\n') : 'No examples have been added yet.'}
+Use these examples as style references, not as facts to copy into the Reel. Match the rhythm, phrasing, attitude, and formatting patterns where appropriate, while keeping every generated hook factually tied to the actual Reel.
 
 Return ONLY valid JSON.
 
@@ -2899,7 +2987,9 @@ app.post(
         await analyzeVideoWithAI(
           videoPath,
           reel.caption,
-          styleProfile
+          styleProfile,
+          account?.styleRules || '',
+          account?.styleExamples || []
         );
 
       reel.analysis =
