@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.1.1';
+const VERSION = '2.2.0';
 
 /*
  * ========================================
@@ -77,11 +77,29 @@ const APIFY_MODE =
 const APIFY_BATCH_SIZE = Math.min(
   Math.max(
     Number(
-      process.env.APIFY_BATCH_SIZE || 20
+      process.env.APIFY_BATCH_SIZE || 30
     ),
     1
   ),
   30
+);
+
+/*
+ * One Sync deliberately walks several Apify cursor pages.
+ * This makes a single Sync reach meaningfully further into
+ * an account's history instead of stopping after ~20-30 Reels.
+ *
+ * 5 pages x 30 Reels = up to 150 Reels per Sync.
+ * The saved cursor means the next Sync continues from there.
+ */
+const SYNC_PAGES_PER_REQUEST = Math.min(
+  Math.max(
+    Number(
+      process.env.SYNC_PAGES_PER_REQUEST || 5
+    ),
+    1
+  ),
+  5
 );
 
 const OPENROUTER_API_KEY =
@@ -2236,7 +2254,7 @@ app.post(
       );
 
       console.log(
-        `Starting V2.0.2 cursor sync for @${account.username}`
+        `Starting V2.2.0 historical cursor sync for @${account.username}`
       );
 
       /*
@@ -2290,6 +2308,9 @@ app.post(
           raw:
             0,
 
+          pagesFetched:
+            0,
+
           total:
             existingReels.length,
 
@@ -2321,69 +2342,142 @@ app.post(
         });
       }
 
-      const pageId =
+      /*
+       * IMPORTANT:
+       * A Sync is a HISTORICAL BATCH, not a single Apify page.
+       *
+       * The actor currently returns at most 30 Reels per run.
+       * We therefore walk up to 5 cursor pages in one Sync,
+       * giving Clipper up to 150 Reels per click.
+       *
+       * The cursor is saved after every successful page, so if
+       * a later page fails the next Sync resumes from the last
+       * successfully processed page rather than starting over.
+       */
+      let pageId =
         account.apifyPageId ||
         null;
 
-      console.log(
-        pageId
-          ? `Continuing from saved NEXT_PAGE_ID: ${String(
+      const initialPageId =
+        pageId;
+
+      let pagesFetched =
+        0;
+
+      let totalRaw =
+        0;
+
+      let totalAdded =
+        0;
+
+      let totalUpdated =
+        0;
+
+      let totalDuplicates =
+        0;
+
+      let lastRunId =
+        null;
+
+      for (
+        let page = 1;
+        page <= SYNC_PAGES_PER_REQUEST;
+        page++
+      ) {
+        if (
+          pageId === null &&
+          page > 1
+        ) {
+          break;
+        }
+
+        console.log(
+          `Historical Sync page ${page}/${SYNC_PAGES_PER_REQUEST} for @${account.username}`
+        );
+
+        const apifyResult =
+          await runApify(
+            account.username,
+            {
+              maxPosts:
+                APIFY_BATCH_SIZE,
+
               pageId
-            ).slice(
-              0,
-              40
-            )}...`
-          : 'No saved cursor. Starting from newest Reels.'
-      );
+            }
+          );
 
-      const apifyResult =
-        await runApify(
-          account.username,
-          {
-            maxPosts:
-              APIFY_BATCH_SIZE,
+        const items =
+          apifyResult.items ||
+          [];
 
-            pageId
-          }
+        console.log(
+          `V2.2.0 page ${page} received ${items.length} raw Apify items.`
         );
 
-      const items =
-        apifyResult.items ||
-        [];
+        const result =
+          saveApifyItems(
+            account,
+            items
+          );
 
-      console.log(
-        `V2.0.2 received ${items.length} raw Apify items.`
-      );
+        totalRaw +=
+          items.length;
 
-      const result =
-        saveApifyItems(
-          account,
-          items
+        totalAdded +=
+          result.added;
+
+        totalUpdated +=
+          result.updated;
+
+        totalDuplicates +=
+          result.duplicates;
+
+        pagesFetched +=
+          1;
+
+        lastRunId =
+          apifyResult.runId ||
+          null;
+
+        /*
+         * Only advance the cursor after this page has been
+         * successfully processed.
+         */
+        pageId =
+          apifyResult.nextPageId ||
+          null;
+
+        account.apifyPageId =
+          pageId;
+
+        account.apifyExhausted =
+          !pageId;
+
+        account.apifyLastRunId =
+          lastRunId;
+
+        account.apifyLastSyncAt =
+          nowIso();
+
+        account.updatedAt =
+          nowIso();
+
+        saveDb(db);
+
+        console.log(
+          `Page ${page} saved: added=${result.added}, updated=${result.updated}, duplicates=${result.duplicates}, nextPage=${Boolean(pageId)}`
         );
 
-      /*
-       * IMPORTANT:
-       * Save the new cursor only after the
-       * dataset has been successfully processed.
-       */
-      account.apifyPageId =
-        apifyResult.nextPageId ||
-        null;
+        if (
+          !pageId
+        ) {
+          console.log(
+            `Instagram history exhausted for @${account.username}.`
+          );
 
-      account.apifyExhausted =
-        !apifyResult.nextPageId;
-
-      account.apifyLastRunId =
-        apifyResult.runId ||
-        null;
-
-      account.apifyLastSyncAt =
-        nowIso();
-
-      account.updatedAt =
-        nowIso();
-
-      saveDb(db);
+          break;
+        }
+      }
 
       const accountReels =
         db.reels
@@ -2417,33 +2511,33 @@ app.post(
         );
 
       console.log(
-        `V2.0.2 sync complete for @${account.username}: added=${result.added}, updated=${result.updated}, duplicates=${result.duplicates}, raw=${items.length}, total=${accountReels.length}, hasNext=${Boolean(
-          account.apifyPageId
-        )}`
+        `V2.2.0 historical sync complete for @${account.username}: pages=${pagesFetched}, added=${totalAdded}, updated=${totalUpdated}, duplicates=${totalDuplicates}, raw=${totalRaw}, total=${accountReels.length}, hasNext=${Boolean(account.apifyPageId)}`
       );
 
-      res.json({
+      return res.json({
         ok:
           true,
 
         mode:
-          pageId
+          initialPageId
             ? 'next-page'
             : 'initial',
 
         account,
 
         added:
-          result.added,
+          totalAdded,
 
         updated:
-          result.updated,
+          totalUpdated,
 
         duplicates:
-          result.duplicates,
+          totalDuplicates,
 
         raw:
-          items.length,
+          totalRaw,
+
+        pagesFetched,
 
         total:
           accountReels.length,
@@ -2474,7 +2568,7 @@ app.post(
       });
     } catch (error) {
       console.error(
-        'Instagram V2.0.2 sync error:',
+        'Instagram V2.2.0 historical sync error:',
         error
       );
 
