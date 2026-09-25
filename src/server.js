@@ -903,45 +903,18 @@ async function getApifyNextPageId(
     return nextPageId;
   } catch (error) {
     /*
-     * A missing cursor record is NOT treated as normal exhaustion.
-     * Before failing, list the actual keys in this run's default
-     * key-value store. This tells us exactly what the Actor wrote
-     * and avoids guessing about cursor storage.
+     * Apify returns 404 when NEXT_PAGE_ID does not exist.
+     * According to the Actor's pagination contract, this means
+     * there is no next page and the profile history is exhausted.
      */
     if (
       String(error.message || '').includes('HTTP 404')
     ) {
-      try {
-        const keysUrl =
-          `https://api.apify.com/v2/key-value-stores/${encodeURIComponent(
-            keyValueStoreId
-          )}/keys?token=${encodeURIComponent(
-            APIFY_TOKEN
-          )}`;
+      console.log(
+        `Apify NEXT_PAGE_ID is not present for run ${runId}; treating history as exhausted.`
+      );
 
-        const keysResponse =
-          await requestJson(
-            keysUrl,
-            {
-              timeout: 30000
-            }
-          );
-
-        const keys =
-          keysResponse?.data?.items ||
-          keysResponse?.items ||
-          [];
-
-        console.error(
-          `Apify KV keys for run ${runId}:`,
-          JSON.stringify(keys)
-        );
-      } catch (keysError) {
-        console.error(
-          `Could not list Apify KV keys for run ${runId}:`,
-          keysError.message
-        );
-      }
+      return null;
     }
 
     throw new Error(
@@ -986,12 +959,12 @@ async function runApify(
     mode:
       APIFY_MODE,
 
-    // The Actor's current API schema calls this field maxItems.
-    maxItems:
+    // The Actor's current API schema calls this field maxPosts.
+    maxPosts:
       Math.min(
         Number(
-          options.maxItems ||
-            options.maxPosts ||
+          options.maxPosts ||
+            options.maxItems ||
             APIFY_BATCH_SIZE
         ),
         30
@@ -1024,7 +997,7 @@ async function runApify(
   );
 
   console.log(
-    `Batch size: ${input.maxItems}`
+    `Batch size: ${input.maxPosts}`
   );
 
   console.log(
