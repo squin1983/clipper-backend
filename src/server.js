@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 
 /*
  * ========================================
@@ -61,13 +61,13 @@ const APIFY_TOKEN =
  * back to the previous Actor.
  */
 const APIFY_ACTOR =
-  'data-slayer~instagram-profile-reels';
+  'hpix~ig-reels-scraper';
 
 /*
  * Exact mode accepted by the Actor.
  */
 const APIFY_MODE =
-  'profile-reels';
+  'reels_only';
 
 /*
  * Fetch 20 Reels per Sync.
@@ -561,23 +561,17 @@ function downloadFile(
 function getReelUrl(item) {
   return firstNonEmpty(
     item.postUrl,
-
+    item.post_url,
     item.url,
-
     item.webUrl,
-
     item.permalink,
-
     item.instagram_url,
-
     item.shortcode
       ? `https://www.instagram.com/reel/${item.shortcode}/`
       : null,
-
     item.shortCode
       ? `https://www.instagram.com/reel/${item.shortCode}/`
       : null,
-
     item.code
       ? `https://www.instagram.com/reel/${item.code}/`
       : null
@@ -673,17 +667,12 @@ function getTimestamp(item) {
   return parseDate(
     firstNonEmpty(
       item.takenAt,
-
+      item.taken_at_formatted,
       item.taken_at,
-
       item.takenAtTimestamp,
-
       item.timestamp,
-
       item.publishedAt,
-
       item.published_at,
-
       item.date
     )
   );
@@ -910,73 +899,214 @@ async function getApifyNextPageId(
 
 async function runApify(username, options = {}) {
   if (!APIFY_TOKEN) throw new Error('APIFY_TOKEN is not configured on Render.');
-  const normalizedUsername = normalizeUsername(username);
-  if (!normalizedUsername) throw new Error('Instagram username is empty.');
 
+  const normalizedUsername = normalizeUsername(username);
+
+  if (!normalizedUsername) {
+    throw new Error('Instagram username is empty.');
+  }
+
+  /*
+   * Hpix is the production Reel source for Clipper.
+   *
+   * Why this Actor:
+   * - mature, high-usage Actor with active maintenance
+   * - reels_only mode
+   * - supports a date window and large per-profile Reel counts
+   * - returns the fields Clipper actually needs in one row:
+   *   URL, timestamp, caption, thumbnail and direct video URL
+   *
+   * We deliberately start at 2020-01-01 because Instagram Reels
+   * launched in 2020 and Clipper's goal is deep historical discovery.
+   */
   const input = {
-    username: normalizedUsername,
-    maxResults: Math.min(Number(options.maxResults || APIFY_BATCH_SIZE), 1000)
+    profiles: [normalizedUsername],
+    target: 'reels_only',
+    reels_count: Math.min(
+      Math.max(
+        Number(options.maxResults || APIFY_BATCH_SIZE),
+        1
+      ),
+      1000
+    ),
+    beginDate: '2020-01-01',
+    include_raw_data: false
   };
 
   console.log('==========================================');
-  console.log('Starting FULL PROFILE REELS sync for @' + normalizedUsername);
+  console.log('Starting DEEP HISTORICAL REELS sync for @' + normalizedUsername);
   console.log('Actor: ' + APIFY_ACTOR);
-  console.log('Max results: ' + input.maxResults);
-  console.log('Apify input:', JSON.stringify(input));
+  console.log('Apify input: ' + JSON.stringify(input));
 
   const startUrl =
-    'https://api.apify.com/v2/acts/' + encodeURIComponent(APIFY_ACTOR) +
-    '/runs?token=' + encodeURIComponent(APIFY_TOKEN) + '&maxItems=1000';
+    'https://api.apify.com/v2/acts/' +
+    encodeURIComponent(APIFY_ACTOR) +
+    '/runs?token=' +
+    encodeURIComponent(APIFY_TOKEN) +
+    '&maxItems=' +
+    encodeURIComponent(input.reels_count);
 
-  const startResponse = await requestJson(startUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-    timeout: 60000
-  });
+  const startResponse = await requestJson(
+    startUrl,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(input),
+      timeout: 60000
+    }
+  );
 
-  const runDataFromStart = startResponse?.data || startResponse;
-  const runId = runDataFromStart?.id;
-  if (!runId) throw new Error('Apify did not return a run ID.');
-  console.log('Apify run started: ' + runId);
+  const runDataFromStart =
+    startResponse?.data ||
+    startResponse;
 
-  const MAX_ATTEMPTS = 120;
+  const runId =
+    runDataFromStart?.id;
+
+  if (!runId) {
+    throw new Error(
+      'Apify did not return a run ID.'
+    );
+  }
+
+  console.log(
+    'Apify run started: ' + runId
+  );
+
+  const MAX_ATTEMPTS = 180;
   const POLL_INTERVAL_MS = 10000;
-  let runData = runDataFromStart;
 
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  let runData =
+    runDataFromStart;
+
+  for (
+    let attempt = 1;
+    attempt <= MAX_ATTEMPTS;
+    attempt++
+  ) {
+    await new Promise(
+      (resolve) =>
+        setTimeout(
+          resolve,
+          POLL_INTERVAL_MS
+        )
+    );
+
     const statusUrl =
-      'https://api.apify.com/v2/actor-runs/' + encodeURIComponent(runId) +
-      '?token=' + encodeURIComponent(APIFY_TOKEN);
-    const statusResponse = await requestJson(statusUrl, { timeout: 30000 });
-    runData = statusResponse?.data || statusResponse;
-    const status = runData?.status;
-    console.log('Apify status ' + attempt + '/' + MAX_ATTEMPTS + ': ' + status);
-    if (['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(status)) break;
+      'https://api.apify.com/v2/actor-runs/' +
+      encodeURIComponent(runId) +
+      '?token=' +
+      encodeURIComponent(APIFY_TOKEN);
+
+    const statusResponse =
+      await requestJson(
+        statusUrl,
+        {
+          timeout: 30000
+        }
+      );
+
+    runData =
+      statusResponse?.data ||
+      statusResponse;
+
+    const status =
+      runData?.status;
+
+    console.log(
+      'Apify status ' +
+      attempt +
+      '/' +
+      MAX_ATTEMPTS +
+      ': ' +
+      status
+    );
+
+    if (
+      [
+        'SUCCEEDED',
+        'FAILED',
+        'ABORTED',
+        'TIMED-OUT'
+      ].includes(status)
+    ) {
+      break;
+    }
   }
 
-  if (runData?.status === 'RUNNING' || runData?.status === 'READY') {
-    throw new Error('Apify run is still ' + runData.status + ' after 20 minutes. Run ID: ' + runId);
+  if (
+    runData?.status === 'RUNNING' ||
+    runData?.status === 'READY'
+  ) {
+    throw new Error(
+      'Apify run is still ' +
+      runData.status +
+      ' after 30 minutes. Run ID: ' +
+      runId
+    );
   }
 
-  const finalStatus = runData?.status;
-  if (!['SUCCEEDED', 'ABORTED', 'TIMED-OUT'].includes(finalStatus)) {
-    throw new Error('Apify run ended with status: ' + finalStatus + '. Run ID: ' + runId);
+  const finalStatus =
+    runData?.status;
+
+  if (
+    finalStatus !== 'SUCCEEDED'
+  ) {
+    throw new Error(
+      'Apify run ended with status: ' +
+      finalStatus +
+      '. Run ID: ' +
+      runId
+    );
   }
 
-  const datasetId = runData.defaultDatasetId;
-  if (!datasetId) throw new Error('Apify run completed but no dataset was returned.');
+  const datasetId =
+    runData.defaultDatasetId;
+
+  if (!datasetId) {
+    throw new Error(
+      'Apify run completed but no dataset was returned.'
+    );
+  }
 
   const datasetUrl =
-    'https://api.apify.com/v2/datasets/' + encodeURIComponent(datasetId) +
-    '/items?token=' + encodeURIComponent(APIFY_TOKEN) + '&clean=true';
-  const items = await requestJson(datasetUrl, { timeout: 120000 });
-  if (!Array.isArray(items)) throw new Error('Apify returned an invalid dataset.');
+    'https://api.apify.com/v2/datasets/' +
+    encodeURIComponent(datasetId) +
+    '/items?token=' +
+    encodeURIComponent(APIFY_TOKEN) +
+    '&clean=true';
 
-  console.log('Apify full profile-Reels run returned ' + items.length + ' items.');
+  const items =
+    await requestJson(
+      datasetUrl,
+      {
+        timeout: 120000
+      }
+    );
+
+  if (!Array.isArray(items)) {
+    throw new Error(
+      'Apify returned an invalid dataset.'
+    );
+  }
+
+  console.log(
+    'Apify Hpix run returned ' +
+    items.length +
+    ' items.'
+  );
+
   if (items.length > 0) {
-    console.log('First profile-Reels item:', JSON.stringify(items[0], null, 2).slice(0, 5000));
+    console.log(
+      'First Hpix Reel item:',
+      JSON.stringify(
+        items[0],
+        null,
+        2
+      ).slice(0, 5000)
+    );
   }
 
   return {
@@ -984,7 +1114,9 @@ async function runApify(username, options = {}) {
     nextPageId: null,
     runId,
     datasetId,
-    keyValueStoreId: runData.defaultKeyValueStoreId || null
+    keyValueStoreId:
+      runData.defaultKeyValueStoreId ||
+      null
   };
 }
 /*
@@ -3884,7 +4016,7 @@ app.listen(
     );
 
     console.log(
-      'Sync strategy: cursor-pagination'
+      'Sync strategy: deep historical Hpix Reel scrape'
     );
 
     console.log(
