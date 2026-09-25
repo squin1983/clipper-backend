@@ -3212,3 +3212,979 @@ async function analyzeVideoWithAI(
         videoPath,
         workDir
       );
+
+    if (
+      !frames.length
+    ) {
+      throw new Error(
+        'Could not extract frames from video.'
+      );
+    }
+
+    const imageParts =
+      frames.map(
+        (
+          framePath
+        ) => ({
+          type:
+            'image_url',
+
+          image_url: {
+            url:
+              imageToDataUrl(
+                framePath
+              )
+          }
+        })
+      );
+
+    const prompt = `
+You are analyzing an Instagram Reel for a social-media remix workflow.
+
+ACCOUNT CONTENT STYLE:
+${styleProfile === 'music' ? 'MUSIC — write hooks/captions in the established style of the Music Instagram account.' : 'MOVIE / TV — write hooks/captions in the established style of the Movie / TV Instagram account.'}
+The selected account style is a hard requirement. Do not mix the two account styles.
+
+STYLE DNA RULES:
+${styleRules || 'No custom Style DNA rules have been added yet. Follow the selected account style only.'}
+
+REAL EXAMPLES FROM THIS ACCOUNT:
+${Array.isArray(styleExamples) && styleExamples.length ? styleExamples.map((example, index) => `${index + 1}. ${example}`).join('\n') : 'No examples have been added yet.'}
+Use these examples as style references, not as facts to copy into the Reel. Match the rhythm, phrasing, attitude, and formatting patterns where appropriate, while keeping every generated hook factually tied to the actual Reel.
+
+Return ONLY valid JSON.
+
+The JSON must contain exactly these fields:
+
+{
+  "summary": "short factual summary of what happens",
+  "hook": "the strongest short viral hook for the Reel",
+  "hookAlternatives": [
+    "alternative hook 1",
+    "alternative hook 2",
+    "alternative hook 3"
+  ],
+  "onScreenText": "short viral-style English text",
+  "caption": "short English Instagram caption",
+  "hashtags": [
+    "#hashtag1",
+    "#hashtag2",
+    "#hashtag3"
+  ],
+  "tone": "description of tone",
+  "topics": [
+    "topic1",
+    "topic2"
+  ]
+}
+
+Rules for hooks:
+- English only.
+- Every hook MUST be at least 5 words long. Prefer 6-9 words. NEVER use more than 10 words.
+- The hook MUST clearly make sense based on the actual video content. It must describe or react to a specific person, action, moment, reaction, situation, joke, twist, or relationship that is genuinely visible or clearly stated in the Reel.
+- Content relevance is more important than generic virality. Never invent context, motives, events, relationships, or details that are not visible or stated.
+- Write like modern Gen-Z Instagram/Reels on-screen text: punchy, conversational, curious, slightly chaotic or reaction-driven when appropriate, but still natural and understandable.
+- Prefer a concise, natural phrase or sentence with enough context to understand what the hook refers to.
+- Keep it short enough for large bold on-screen text, normally 1-2 lines. Aim for about 55 characters when possible, but NEVER sacrifice meaning just to hit a character limit.
+- Create curiosity from the actual content without falsely hiding or changing the context.
+- Focus on the funniest, most surprising, awkward, iconic, controversial, or unexpected moment actually visible in the Reel.
+- Use 1-2 relevant emojis when they genuinely fit the moment. Do not add random emojis or let emojis replace important words.
+- Avoid unnecessary long names, explanations, dates, locations, and background details unless they are essential to understanding the actual moment.
+- Avoid generic filler such as "This is crazy", "You won't believe this", or "Wait for it".
+- Do not use quotation marks around hooks.
+- Do not end hooks with a period.
+- Each hook alternative must be meaningfully different AND independently relevant to the actual Reel, not the same sentence rearranged.
+- The hook must make sense when read by itself and must be clearly connected to the Reel.
+- The hook must be suitable for large bold on-screen text and should normally fit into 1-2 lines.
+
+Rules for the other fields:
+- Do not invent facts that are not visible or stated.
+- Make on-screen text suitable for a Reel.
+- Avoid generic filler.
+- Focus on the actual moment shown.
+
+Original Instagram caption:
+${caption || ''}
+`;
+
+    const response =
+      await requestJson(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          method:
+            'POST',
+
+          headers: {
+            'Content-Type':
+              'application/json',
+
+            Authorization:
+              `Bearer ${OPENROUTER_API_KEY}`,
+
+            'HTTP-Referer':
+              'https://squin1983.github.io/Clipper/',
+
+            'X-Title':
+              'Clipper'
+          },
+
+          body:
+            JSON.stringify({
+              model:
+                OPENROUTER_MODEL,
+
+              messages: [
+                {
+                  role:
+                    'user',
+
+                  content: [
+                    {
+                      type:
+                        'text',
+
+                      text:
+                        prompt
+                    },
+
+                    ...imageParts
+                  ]
+                }
+              ],
+
+              response_format: {
+                type:
+                  'json_object'
+              }
+            }),
+
+          timeout:
+            120000
+        }
+      );
+
+    const content =
+      response
+        ?.choices?.[0]
+        ?.message
+        ?.content;
+
+    if (!content) {
+      throw new Error(
+        'OpenRouter returned no AI content.'
+      );
+    }
+
+    let parsed =
+      safeJsonParse(
+        content
+      );
+
+    if (!parsed) {
+      const match =
+        content.match(
+          /\{[\s\S]*\}/
+        );
+
+      if (match) {
+        parsed =
+          safeJsonParse(
+            match[0]
+          );
+      }
+    }
+
+    if (!parsed) {
+      throw new Error(
+        'OpenRouter returned invalid JSON.'
+      );
+    }
+
+    return parsed;
+  } finally {
+    try {
+      fs.rmSync(
+        workDir,
+        {
+          recursive:
+            true,
+
+          force:
+            true
+        }
+      );
+    } catch {}
+  }
+}
+
+app.post(
+  '/api/reels/:id/analyze',
+  async (
+    req,
+    res
+  ) => {
+    const reel =
+      db.reels.find(
+        (item) =>
+          item.id ===
+          req.params.id
+      );
+
+    if (!reel) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Reel not found.'
+        });
+    }
+
+    if (
+      !reel.videoUrl
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'This Reel does not have a downloadable video URL.'
+        });
+    }
+
+    const workDir =
+      fs.mkdtempSync(
+        path.join(
+          '/tmp/',
+          'clipper-video-'
+        )
+      );
+
+    const videoPath =
+      path.join(
+        workDir,
+        'source.mp4'
+      );
+
+    try {
+      console.log(
+        `Downloading Reel video for ${reel.id}`
+      );
+
+      await downloadFile(
+        reel.videoUrl,
+        videoPath
+      );
+
+      console.log(
+        `Analyzing Reel ${reel.id} with OpenRouter`
+      );
+
+      const account =
+        db.accounts.find(
+          (item) =>
+            item.id === reel.accountId
+        );
+
+      const requestedStyle =
+        account?.styleProfile;
+
+      const styleProfile =
+        requestedStyle === 'music'
+          ? 'music'
+          : requestedStyle === 'meme'
+          ? 'meme'
+          : 'movie_tv';
+
+      const analysis =
+        await analyzeVideoWithAI(
+          videoPath,
+          reel.caption,
+          styleProfile,
+          account?.styleRules || '',
+          account?.styleExamples || []
+        );
+
+      reel.analysis =
+        analysis;
+
+      reel.updatedAt =
+        nowIso();
+
+      saveDb(db);
+
+      res.json({
+        ok:
+          true,
+
+        reel
+      });
+    } catch (
+      error
+    ) {
+      console.error(
+        'Analyze error:',
+        error
+      );
+
+      res
+        .status(500)
+        .json({
+          error:
+            error.message ||
+            'Reel analysis failed.'
+        });
+    } finally {
+      try {
+        fs.rmSync(
+          workDir,
+          {
+            recursive:
+              true,
+
+            force:
+              true
+          }
+        );
+      } catch {}
+    }
+  }
+);
+
+/*
+ * ========================================
+ * HOOK
+ * ========================================
+ */
+
+app.post(
+  '/api/reels/:id/hook',
+  (req, res) => {
+    const reel =
+      db.reels.find(
+        (item) =>
+          item.id ===
+          req.params.id
+      );
+
+    if (!reel) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Reel not found.'
+        });
+    }
+
+    const hook =
+      String(
+        req.body?.hook ||
+          ''
+      ).trim();
+
+    if (!hook) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Hook is required.'
+        });
+    }
+
+    reel.selectedHook =
+      hook;
+
+    reel.updatedAt =
+      nowIso();
+
+    saveDb(db);
+
+    res.json({
+      ok:
+        true,
+
+      reel
+    });
+  }
+);
+
+/*
+ * ========================================
+ * RENDER
+ * ========================================
+ */
+
+app.post(
+  '/api/jobs/:reelId/render',
+  async (
+    req,
+    res
+  ) => {
+    const reel =
+      db.reels.find(
+        (item) =>
+          item.id ===
+          req.params.reelId
+      );
+
+    if (!reel) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Reel not found.'
+        });
+    }
+
+    if (
+      !reel.videoUrl
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            'Reel has no video URL.'
+        });
+    }
+
+    const requestedHook =
+      String(
+        req.body?.hook ||
+          ''
+      ).trim();
+
+    if (
+      requestedHook
+    ) {
+      reel.selectedHook =
+        requestedHook;
+
+      reel.updatedAt =
+        nowIso();
+
+      saveDb(db);
+    }
+
+    const jobId =
+      id('job_');
+
+    const job = {
+      id:
+        jobId,
+
+      reelId:
+        reel.id,
+
+      status:
+        'queued',
+
+      createdAt:
+        nowIso(),
+
+      updatedAt:
+        nowIso(),
+
+      outputUrl:
+        null,
+
+      error:
+        null
+    };
+
+    db.jobs.push(
+      job
+    );
+
+    saveDb(db);
+
+    res.json({
+      ok:
+        true,
+
+      job
+    });
+
+    (
+      async () => {
+        let workDir =
+          null;
+
+        try {
+          job.status =
+            'processing';
+
+          job.updatedAt =
+            nowIso();
+
+          saveDb(db);
+
+          workDir =
+            fs.mkdtempSync(
+              path.join(
+                '/tmp/',
+                'clipper-render-'
+              )
+            );
+
+          const sourcePath =
+            path.join(
+              workDir,
+              'source.mp4'
+            );
+
+          const outputPath =
+            path.join(
+              RENDER_DIR,
+              `${jobId}.mp4`
+            );
+
+          console.log(
+            `Render ${jobId}: downloading source`
+          );
+
+          await downloadFile(
+            reel.videoUrl,
+            sourcePath
+          );
+
+          const hook =
+            reel.selectedHook ||
+            reel.analysis?.hook ||
+            '';
+
+          /*
+           * FFmpeg's drawtext font does not reliably support emoji,
+           * so remove unsupported Unicode symbols to avoid square glyphs.
+           */
+          const safeHook =
+            String(hook)
+              .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+              .replace(/\s{2,}/g, ' ')
+              .trim();
+
+          const hookWords =
+            safeHook
+              .split(/\s+/)
+              .filter(Boolean);
+
+          /*
+           * Keep the hook to a maximum of two visual lines.
+           * We split around the middle instead of creating a tall
+           * three/four-line block.
+           */
+          const hookLines = [];
+
+          if (hookWords.length) {
+            let bestSplit = hookWords.length;
+            let bestDiff = Infinity;
+
+            for (let split = 1; split < hookWords.length; split++) {
+              const left = hookWords.slice(0, split).join(' ');
+              const right = hookWords.slice(split).join(' ');
+              const diff = Math.abs(left.length - right.length);
+
+              if (
+                left.length <= 30 &&
+                right.length <= 30 &&
+                diff < bestDiff
+              ) {
+                bestSplit = split;
+                bestDiff = diff;
+              }
+            }
+
+            if (bestSplit < hookWords.length) {
+              hookLines.push(
+                hookWords.slice(0, bestSplit).join(' ')
+              );
+              hookLines.push(
+                hookWords.slice(bestSplit).join(' ')
+              );
+            } else {
+              hookLines.push(
+                hookWords.join(' ')
+              );
+            }
+          }
+
+          const hookTextPath =
+            path.join(workDir, 'hook.txt');
+
+          fs.writeFileSync(
+            hookTextPath,
+            hookLines.join('\n'),
+            'utf8'
+          );
+
+          const escapedHookTextPath =
+            hookTextPath
+              .replace(/\\/g, '\\\\')
+              .replace(/:/g, '\\:')
+              .replace(/'/g, "\\'");
+
+          const hookMaxLineLength =
+            Math.max(
+              ...hookLines.map(
+                (line) => line.length
+              ),
+              0
+            );
+
+          const hookFontSize =
+            hookMaxLineLength > 26
+              ? 46
+              : 56;
+
+          /*
+           * Instagram Reel source is normally horizontal.
+           * Fit it inside the 9:16 canvas instead of cropping the sides.
+           *
+           * The original source hook sits near the top of the horizontal
+           * video. Cover only that area with an opaque black strip so the
+           * original hook cannot bleed through.
+           */
+          const filter =
+            [
+              'scale=1080:1920:force_original_aspect_ratio=decrease',
+              'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
+              'setsar=1',
+              hookLines.length
+                ? 'drawbox=x=0:y=400:w=iw:h=650:color=black@1.0:t=fill'
+                : null,
+              hookLines.length
+                ? `drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':textfile='${escapedHookTextPath}':fontcolor=white:alpha=1:fontsize=${hookFontSize}:line_spacing=8:borderw=5:bordercolor=black:x=(w-text_w)/2:y=700`
+                : null
+            ]
+              .filter(Boolean)
+              .join(',');
+
+          console.log(
+            `Render ${jobId}: ffmpeg`
+          );
+
+          await execFileAsync(
+            'ffmpeg',
+            [
+              '-y',
+
+              '-i',
+              sourcePath,
+
+              '-vf',
+              filter,
+
+              '-threads',
+              '2',
+
+              '-c:v',
+              'libx264',
+
+              '-preset',
+              'ultrafast',
+
+              '-crf',
+              '25',
+
+              '-c:a',
+              'aac',
+
+              '-b:a',
+              '128k',
+
+              '-movflags',
+              '+faststart',
+
+              outputPath
+            ],
+            {
+              timeout:
+                300000
+            }
+          );
+
+          if (
+            !fs.existsSync(
+              outputPath
+            )
+          ) {
+            throw new Error(
+              'FFmpeg completed but output file was not created.'
+            );
+          }
+
+          job.status =
+            'completed';
+
+          job.outputUrl =
+            `/api/jobs/${jobId}/download`;
+
+          job.updatedAt =
+            nowIso();
+
+          reel.render = {
+            jobId,
+
+            status:
+              'completed',
+
+            outputUrl:
+              job.outputUrl,
+
+            updatedAt:
+              nowIso()
+          };
+
+          saveDb(db);
+
+          console.log(
+            `Render ${jobId}: completed`
+          );
+        } catch (
+          error
+        ) {
+          console.error(
+            `Render ${jobId} failed:`,
+            error
+          );
+
+          const currentJob =
+            db.jobs.find(
+              (item) =>
+                item.id ===
+                jobId
+            );
+
+          if (
+            currentJob
+          ) {
+            currentJob.status =
+              'failed';
+
+            currentJob.error =
+              error.message;
+
+            currentJob.updatedAt =
+              nowIso();
+          }
+
+          reel.render = {
+            jobId,
+
+            status:
+              'failed',
+
+            error:
+              error.message,
+
+            updatedAt:
+              nowIso()
+          };
+
+          saveDb(db);
+        } finally {
+          if (
+            workDir
+          ) {
+            try {
+              fs.rmSync(
+                workDir,
+                {
+                  recursive:
+                    true,
+
+                  force:
+                    true
+                }
+              );
+            } catch {}
+          }
+        }
+      }
+    )();
+  }
+);
+
+/*
+ * ========================================
+ * JOBS
+ * ========================================
+ */
+
+app.get(
+  '/api/jobs/:id',
+  (req, res) => {
+    const job =
+      db.jobs.find(
+        (item) =>
+          item.id ===
+          req.params.id
+      );
+
+    if (!job) {
+      return res
+        .status(404)
+        .json({
+          error:
+            'Job not found.'
+        });
+    }
+
+    res.json({
+      job
+    });
+  }
+);
+
+function sendRenderedFile(
+  req,
+  res
+) {
+  const job =
+    db.jobs.find(
+      (item) =>
+        item.id ===
+        req.params.id
+    );
+
+  if (!job) {
+    return res
+      .status(404)
+      .send(
+        'Render job not found.'
+      );
+  }
+
+  if (
+    job.status !==
+    'completed'
+  ) {
+    return res
+      .status(409)
+      .send(
+        'Render is not completed yet.'
+      );
+  }
+
+  const filePath =
+    path.join(
+      RENDER_DIR,
+      `${job.id}.mp4`
+    );
+
+  if (
+    !fs.existsSync(
+      filePath
+    )
+  ) {
+    return res
+      .status(404)
+      .send(
+        'Rendered file no longer exists.'
+      );
+  }
+
+  res.download(
+    filePath,
+    `clipper-${job.reelId}.mp4`
+  );
+}
+
+app.get(
+  '/api/jobs/:id/download',
+  sendRenderedFile
+);
+
+app.get(
+  '/api/jobs/:id/file',
+  sendRenderedFile
+);
+
+/*
+ * ========================================
+ * 404
+ * ========================================
+ */
+
+app.use(
+  (req, res) => {
+    res
+      .status(404)
+      .json({
+        error:
+          'Endpoint not found.',
+
+        path:
+          req.path
+      });
+  }
+);
+
+/*
+ * ========================================
+ * ERROR HANDLER
+ * ========================================
+ */
+
+app.use(
+  (
+    error,
+    req,
+    res,
+    next
+  ) => {
+    console.error(
+      'Unhandled server error:',
+      error
+    );
+
+    if (
+      res.headersSent
+    ) {
+      return next(
+        error
+      );
+    }
+
+    res
+      .status(500)
+      .json({
+        error:
+          error.message ||
+          'Internal server error.'
+      });
+  }
+);
+
+/*
+ * ========================================
+ * START
+ * ========================================
+ */
+
+app.listen(
+  PORT,
+  '0.0.0.0',
+  () => {
+    console.log(
+      `Clipper backend v${VERSION} listening on port ${PORT}`
+    );
+
+    console.log(
+      `Apify actor: ${APIFY_ACTOR}`
+    );
+
+    console.log(
+      `Apify batch size: ${APIFY_BATCH_SIZE}`
+    );
+
+    console.log(
+      `Apify mode: ${APIFY_MODE}`
+    );
+
+    console.log(
+      'Sync strategy: cursor-pagination'
+    );
+
+    console.log(
+      `OpenRouter model: ${OPENROUTER_MODEL}`
+    );
+  }
+);
