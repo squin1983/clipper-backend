@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.2.1';
+const VERSION = '2.3.0';
 
 /*
  * ========================================
@@ -61,13 +61,13 @@ const APIFY_TOKEN =
  * back to the previous Actor.
  */
 const APIFY_ACTOR =
-  'seemuapps~instagram-posts-scraper';
+  'data-slayer~instagram-profile-reels';
 
 /*
  * Exact mode accepted by the Actor.
  */
 const APIFY_MODE =
-  'all';
+  'profile-reels';
 
 /*
  * Fetch 20 Reels per Sync.
@@ -78,30 +78,14 @@ const APIFY_MODE =
 const APIFY_BATCH_SIZE = Math.min(
   Math.max(
     Number(
-      process.env.APIFY_BATCH_SIZE || 30
+      process.env.APIFY_BATCH_SIZE || 1000
     ),
     1
   ),
-  30
+  1000
 );
 
-/*
- * One Sync deliberately walks several Apify cursor pages.
- * This makes a single Sync reach meaningfully further into
- * an account's history instead of stopping after ~20-30 Reels.
- *
- * 5 pages x 30 Reels = up to 150 Reels per Sync.
- * The saved cursor means the next Sync continues from there.
- */
-const SYNC_PAGES_PER_REQUEST = Math.min(
-  Math.max(
-    Number(
-      process.env.SYNC_PAGES_PER_REQUEST || 10
-    ),
-    1
-  ),
-  10
-);
+const SYNC_PAGES_PER_REQUEST = 1;
 
 const OPENROUTER_API_KEY =
   process.env.OPENROUTER_API_KEY || '';
@@ -924,363 +908,85 @@ async function getApifyNextPageId(
   }
 }
 
-async function runApify(
-  username,
-  options = {}
-) {
-  if (!APIFY_TOKEN) {
-    throw new Error(
-      'APIFY_TOKEN is not configured on Render.'
-    );
-  }
+async function runApify(username, options = {}) {
+  if (!APIFY_TOKEN) throw new Error('APIFY_TOKEN is not configured on Render.');
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) throw new Error('Instagram username is empty.');
 
-  const normalizedUsername =
-    normalizeUsername(
-      username
-    );
-
-  if (!normalizedUsername) {
-    throw new Error(
-      'Instagram username is empty.'
-    );
-  }
-
-  /*
-   * EXACT INPUT EXPECTED BY THE ACTOR:
-   *
-   * username
-   * mode = "reels"
-   * maxItems
-   * pageId (only when continuing)
-   */
   const input = {
-    username:
-      normalizedUsername,
-
-    mode:
-      APIFY_MODE,
-
-    // The Actor's current API schema calls this field maxItems.
-    maxItems:
-      Math.min(
-        Number(
-          options.maxItems ||
-            options.maxPosts ||
-            APIFY_BATCH_SIZE
-        ),
-        30
-      )
+    username: normalizedUsername,
+    maxResults: Math.min(Number(options.maxResults || APIFY_BATCH_SIZE), 1000)
   };
 
-  if (
-    options.pageId
-  ) {
-    input.pageId =
-      String(
-        options.pageId
-      );
-  }
-
-  console.log(
-    '=========================================='
-  );
-
-  console.log(
-    `Starting cursor-based Apify sync for @${normalizedUsername}`
-  );
-
-  console.log(
-    `Actor: ${APIFY_ACTOR}`
-  );
-
-  console.log(
-    `Mode: ${APIFY_MODE}`
-  );
-
-  console.log(
-    `Batch size: ${input.maxItems}`
-  );
-
-  console.log(
-    'Apify input:',
-    JSON.stringify(
-      input
-    )
-  );
+  console.log('==========================================');
+  console.log('Starting FULL PROFILE REELS sync for @' + normalizedUsername);
+  console.log('Actor: ' + APIFY_ACTOR);
+  console.log('Max results: ' + input.maxResults);
+  console.log('Apify input:', JSON.stringify(input));
 
   const startUrl =
-    `https://api.apify.com/v2/acts/${encodeURIComponent(
-      APIFY_ACTOR
-    )}/runs` +
-    `?token=${encodeURIComponent(
-      APIFY_TOKEN
-    )}`;
+    'https://api.apify.com/v2/acts/' + encodeURIComponent(APIFY_ACTOR) +
+    '/runs?token=' + encodeURIComponent(APIFY_TOKEN);
 
-  const startResponse =
-    await requestJson(
-      startUrl,
-      {
-        method:
-          'POST',
+  const startResponse = await requestJson(startUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+    timeout: 60000
+  });
 
-        headers: {
-          'Content-Type':
-            'application/json'
-        },
-
-        body:
-          JSON.stringify(
-            input
-          ),
-
-        timeout:
-          60000
-      }
-    );
-
-  const runDataFromStart =
-    startResponse?.data ||
-    startResponse;
-
-  const runId =
-    runDataFromStart?.id;
-
-  if (!runId) {
-    throw new Error(
-      'Apify did not return a run ID.'
-    );
-  }
-
-  console.log(
-    `Apify run started: ${runId}`
-  );
+  const runDataFromStart = startResponse?.data || startResponse;
+  const runId = runDataFromStart?.id;
+  if (!runId) throw new Error('Apify did not return a run ID.');
+  console.log('Apify run started: ' + runId);
 
   const MAX_ATTEMPTS = 120;
+  const POLL_INTERVAL_MS = 10000;
+  let runData = runDataFromStart;
 
-  const POLL_INTERVAL_MS =
-    10000;
-
-  let runData =
-    runDataFromStart;
-
-  for (
-    let attempt = 1;
-    attempt <=
-      MAX_ATTEMPTS;
-    attempt++
-  ) {
-    await new Promise(
-      (resolve) =>
-        setTimeout(
-          resolve,
-          POLL_INTERVAL_MS
-        )
-    );
-
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     const statusUrl =
-      `https://api.apify.com/v2/actor-runs/${encodeURIComponent(
-        runId
-      )}` +
-      `?token=${encodeURIComponent(
-        APIFY_TOKEN
-      )}`;
-
-    const statusResponse =
-      await requestJson(
-        statusUrl,
-        {
-          timeout:
-            30000
-        }
-      );
-
-    runData =
-      statusResponse?.data ||
-      statusResponse;
-
-    const status =
-      runData?.status;
-
-    const duration =
-      runData?.startedAt
-        ? Math.round(
-            (
-              Date.now() -
-              new Date(
-                runData.startedAt
-              ).getTime()
-            ) /
-              1000
-          )
-        : null;
-
-    console.log(
-      `Apify status ${attempt}/${MAX_ATTEMPTS}: ${status}` +
-        (
-          duration !==
-          null
-            ? ` (${duration}s)`
-            : ''
-        )
-    );
-
-    if (
-      [
-        'SUCCEEDED',
-        'FAILED',
-        'ABORTED',
-        'TIMED-OUT'
-      ].includes(
-        status
-      )
-    ) {
-      break;
-    }
+      'https://api.apify.com/v2/actor-runs/' + encodeURIComponent(runId) +
+      '?token=' + encodeURIComponent(APIFY_TOKEN);
+    const statusResponse = await requestJson(statusUrl, { timeout: 30000 });
+    runData = statusResponse?.data || statusResponse;
+    const status = runData?.status;
+    console.log('Apify status ' + attempt + '/' + MAX_ATTEMPTS + ': ' + status);
+    if (['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(status)) break;
   }
 
-  if (
-    runData?.status ===
-      'RUNNING' ||
-    runData?.status ===
-      'READY'
-  ) {
-    throw new Error(
-      `Apify run is still ${runData.status} after 20 minutes. Run ID: ${runId}`
-    );
+  if (runData?.status === 'RUNNING' || runData?.status === 'READY') {
+    throw new Error('Apify run is still ' + runData.status + ' after 20 minutes. Run ID: ' + runId);
   }
 
-  /*
-   * IMPORTANT:
-   * The Apify actor can finish with ABORTED or TIMED-OUT after it has
-   * already written useful items to its dataset (for example when the
-   * run hits its configured maximum cost). In that case we must still
-   * process the dataset and NEXT_PAGE_ID instead of discarding the page.
-   *
-   * FAILED remains a hard error because it normally indicates that the
-   * actor did not complete its work successfully.
-   */
   const finalStatus = runData?.status;
-  const partialStatuses = [
-    'ABORTED',
-    'TIMED-OUT'
-  ];
-
-  if (
-    finalStatus !== 'SUCCEEDED' &&
-    !partialStatuses.includes(finalStatus)
-  ) {
-    throw new Error(
-      `Apify run ended with status: ${finalStatus}. Run ID: ${runId}`
-    );
+  if (!['SUCCEEDED', 'ABORTED', 'TIMED-OUT'].includes(finalStatus)) {
+    throw new Error('Apify run ended with status: ' + finalStatus + '. Run ID: ' + runId);
   }
 
-  if (partialStatuses.includes(finalStatus)) {
-    console.warn(
-      `Apify run ended with ${finalStatus}. Processing any dataset items already produced. Run ID: ${runId}`
-    );
-  }
-
-  console.log(
-    `Apify final status: ${finalStatus}`
-  );
-
-  const datasetId =
-    runData.defaultDatasetId;
-
-  const keyValueStoreId =
-    runData.defaultKeyValueStoreId;
-
-  if (!datasetId) {
-    throw new Error(
-      'Apify run completed but no dataset was returned.'
-    );
-  }
-
-  console.log(
-    `Apify dataset: ${datasetId}`
-  );
-
-  console.log(
-    `Apify key-value store: ${
-      keyValueStoreId ||
-      'not returned'
-    }`
-  );
+  const datasetId = runData.defaultDatasetId;
+  if (!datasetId) throw new Error('Apify run completed but no dataset was returned.');
 
   const datasetUrl =
-    `https://api.apify.com/v2/datasets/${encodeURIComponent(
-      datasetId
-    )}/items` +
-    `?token=${encodeURIComponent(
-      APIFY_TOKEN
-    )}` +
-    `&clean=true`;
+    'https://api.apify.com/v2/datasets/' + encodeURIComponent(datasetId) +
+    '/items?token=' + encodeURIComponent(APIFY_TOKEN) + '&clean=true';
+  const items = await requestJson(datasetUrl, { timeout: 120000 });
+  if (!Array.isArray(items)) throw new Error('Apify returned an invalid dataset.');
 
-  const items =
-    await requestJson(
-      datasetUrl,
-      {
-        timeout:
-          120000
-      }
-    );
-
-  if (!Array.isArray(items)) {
-    throw new Error(
-      'Apify returned an invalid dataset.'
-    );
-  }
-
-  /*
-   * IMPORTANT:
-   * Retrieve the cursor only after the
-   * actor has completed.
-   */
-  const nextPageId =
-    await getApifyNextPageId(
-      keyValueStoreId,
-      runId
-    );
-
-  console.log(
-    `Apify returned ${items.length} items.`
-  );
-
-  console.log(
-    `NEXT_PAGE_ID: ${
-      nextPageId
-        ? `${String(
-            nextPageId
-          ).slice(0, 30)}...`
-        : 'null'
-    }`
-  );
-
-  if (
-    items.length > 0
-  ) {
-    console.log(
-      'First Apify item:',
-      JSON.stringify(
-        items[0],
-        null,
-        2
-      ).slice(
-        0,
-        5000
-      )
-    );
+  console.log('Apify full profile-Reels run returned ' + items.length + ' items.');
+  if (items.length > 0) {
+    console.log('First profile-Reels item:', JSON.stringify(items[0], null, 2).slice(0, 5000));
   }
 
   return {
     items,
-    nextPageId,
+    nextPageId: null,
     runId,
     datasetId,
-    keyValueStoreId
+    keyValueStoreId: runData.defaultKeyValueStoreId || null
   };
 }
-
 /*
  * ========================================
  * SAVE / UPSERT APIFY REELS
@@ -2300,7 +2006,7 @@ app.post(
       );
 
       console.log(
-        `Starting V2.2.0 historical cursor sync for @${account.username}`
+        `Starting V2.3.0 historical cursor sync for @${account.username}`
       );
 
       /*
@@ -2309,6 +2015,7 @@ app.post(
        * force=true was explicitly requested.
        */
       if (
+        APIFY_MODE !== 'profile-reels' &&
         account.apifyExhausted &&
         !req.body?.force
       ) {
@@ -2417,9 +2124,7 @@ app.post(
         saveDb(db);
       }
 
-      let pageId =
-        account.apifyPageId ||
-        null;
+      let pageId = null;
 
       const initialPageId =
         pageId;
@@ -2474,7 +2179,7 @@ app.post(
           [];
 
         console.log(
-          `V2.2.0 page ${page} received ${items.length} raw Apify items.`
+          `V2.3.0 page ${page} received ${items.length} raw Apify items.`
         );
 
         const result =
@@ -2516,8 +2221,7 @@ app.post(
         account.apifyPaginationMode =
           APIFY_MODE;
 
-        account.apifyExhausted =
-          !pageId;
+        account.apifyExhausted = false;
 
         account.apifyLastRunId =
           lastRunId;
@@ -2577,7 +2281,7 @@ app.post(
         );
 
       console.log(
-        `V2.2.0 historical sync complete for @${account.username}: pages=${pagesFetched}, added=${totalAdded}, updated=${totalUpdated}, duplicates=${totalDuplicates}, raw=${totalRaw}, total=${accountReels.length}, hasNext=${Boolean(account.apifyPageId)}`
+        `V2.3.0 historical sync complete for @${account.username}: pages=${pagesFetched}, added=${totalAdded}, updated=${totalUpdated}, duplicates=${totalDuplicates}, raw=${totalRaw}, total=${accountReels.length}, hasNext=${Boolean(account.apifyPageId)}`
       );
 
       return res.json({
@@ -2634,7 +2338,7 @@ app.post(
       });
     } catch (error) {
       console.error(
-        'Instagram V2.2.0 historical sync error:',
+        'Instagram V2.3.0 historical sync error:',
         error
       );
 
