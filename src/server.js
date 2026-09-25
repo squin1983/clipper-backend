@@ -954,7 +954,8 @@ async function runApify(
     maxItems:
       Math.min(
         Number(
-          options.maxPosts ||
+          options.maxItems ||
+            options.maxPosts ||
             APIFY_BATCH_SIZE
         ),
         30
@@ -987,7 +988,7 @@ async function runApify(
   );
 
   console.log(
-    `Batch size: ${input.maxPosts}`
+    `Batch size: ${input.maxItems}`
   );
 
   console.log(
