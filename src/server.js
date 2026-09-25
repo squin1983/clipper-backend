@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.1.0';
+const VERSION = '2.1.1';
 
 /*
  * ========================================
@@ -1562,6 +1562,8 @@ app.post(
       const styleProfile =
         requestedStyle === 'music'
           ? 'music'
+          : requestedStyle === 'meme'
+          ? 'meme'
           : 'movie_tv';
 
       const existing =
@@ -1830,6 +1832,8 @@ app.post(
 ACCOUNT STYLE:
 ${account.styleProfile === 'music'
   ? 'MUSIC'
+  : account.styleProfile === 'meme'
+  ? 'MEME'
   : 'MOVIE / TV'}
 
 Below are real hooks or Instagram captions taken from this account. They are STYLE EVIDENCE, not facts to reuse.
@@ -2015,9 +2019,14 @@ app.put(
       }
 
       if (req.body?.styleProfile !== undefined) {
+        const requestedStyle =
+          String(req.body.styleProfile).trim();
+
         account.styleProfile =
-          String(req.body.styleProfile).trim() === 'music'
+          requestedStyle === 'music'
             ? 'music'
+            : requestedStyle === 'meme'
+            ? 'meme'
             : 'movie_tv';
       }
 
@@ -2040,6 +2049,62 @@ app.put(
     } catch (error) {
       console.error('Update account error:', error);
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+app.post(
+  '/api/accounts/restore',
+  (req, res) => {
+    try {
+      const account = req.body?.account;
+
+      if (!account?.id || !account?.username) {
+        return res.status(400).json({
+          error: 'An account with id and username is required.'
+        });
+      }
+
+      const requestedStyle =
+        String(account.styleProfile || 'movie_tv').trim();
+
+      const normalizedStyle =
+        requestedStyle === 'music'
+          ? 'music'
+          : requestedStyle === 'meme'
+          ? 'meme'
+          : 'movie_tv';
+
+      let existing = db.accounts.find(
+        (item) => item.id === account.id
+      );
+
+      const restored = {
+        ...account,
+        id: account.id,
+        username: normalizeUsername(account.username),
+        styleProfile: normalizedStyle,
+        updatedAt: nowIso()
+      };
+
+      if (existing) {
+        Object.assign(existing, restored);
+      } else {
+        existing = restored;
+        db.accounts.push(existing);
+      }
+
+      saveDb(db);
+
+      res.json({
+        ok: true,
+        account: existing
+      });
+    } catch (error) {
+      console.error('Restore account error:', error);
+      res.status(500).json({
+        error: error.message
+      });
     }
   }
 );
@@ -3256,9 +3321,14 @@ app.post(
             item.id === reel.accountId
         );
 
+      const requestedStyle =
+        account?.styleProfile;
+
       const styleProfile =
-        account?.styleProfile === 'music'
+        requestedStyle === 'music'
           ? 'music'
+          : requestedStyle === 'meme'
+          ? 'meme'
           : 'movie_tv';
 
       const analysis =
