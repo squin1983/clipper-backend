@@ -926,7 +926,7 @@ async function runApify(username, options = {}) {
 
   const startUrl =
     'https://api.apify.com/v2/acts/' + encodeURIComponent(APIFY_ACTOR) +
-    '/runs?token=' + encodeURIComponent(APIFY_TOKEN);
+    '/runs?token=' + encodeURIComponent(APIFY_TOKEN) + '&maxItems=1000';
 
   const startResponse = await requestJson(startUrl, {
     method: 'POST',
