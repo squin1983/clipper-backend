@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.8';
+const VERSION = '2.0.9';
 
 /*
  * ========================================
@@ -3616,7 +3616,7 @@ app.post(
                 ? 'drawbox=x=0:y=650:w=iw:h=300:color=black@1.0:t=fill'
                 : null,
               hookLines.length
-                ? `drawtext=font='DejaVu Sans:style=Bold':textfile='${escapedHookTextPath}':fontcolor=white:alpha=1:fontsize=${hookFontSize}:line_spacing=8:borderw=5:bordercolor=black:x=(w-text_w)/2:y=700`
+                ? `drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':textfile='${escapedHookTextPath}':fontcolor=white:alpha=1:fontsize=${hookFontSize}:line_spacing=8:borderw=5:bordercolor=black:x=(w-text_w)/2:y=700`
                 : null
             ]
               .filter(Boolean)
