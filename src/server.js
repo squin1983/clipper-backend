@@ -813,6 +813,10 @@ async function getApifyNextPageId(
       APIFY_TOKEN
     )}`;
 
+  console.log(
+    `Reading Apify NEXT_PAGE_ID from key-value store ${keyValueStoreId}`
+  );
+
   try {
     const value =
       await requestJson(
@@ -823,75 +827,89 @@ async function getApifyNextPageId(
         }
       );
 
+    console.log(
+      'Raw NEXT_PAGE_ID response type:',
+      typeof value
+    );
+
+    console.log(
+      'Raw NEXT_PAGE_ID response:',
+      JSON.stringify(value).slice(0, 2000)
+    );
+
     if (
       value === null ||
       value === undefined
     ) {
+      console.warn(
+        'Apify NEXT_PAGE_ID response was empty.'
+      );
       return null;
     }
 
+    let nextPageId = null;
+
     if (
-      typeof value ===
-      'string'
+      typeof value === 'string'
     ) {
-      const trimmed =
+      nextPageId =
         value.trim();
-
-      if (
-        !trimmed ||
-        trimmed ===
-          'null'
-      ) {
-        return null;
-      }
-
-      return trimmed;
+    } else if (
+      typeof value === 'object'
+    ) {
+      nextPageId =
+        firstNonEmpty(
+          value.value,
+          value.pageId,
+          value.nextPageId,
+          value.data?.value,
+          value.data?.pageId,
+          value.data?.nextPageId
+        );
+    } else {
+      nextPageId =
+        String(value).trim();
     }
 
     if (
-      typeof value ===
-      'object'
+      nextPageId === null ||
+      nextPageId === undefined
     ) {
-      if (
-        typeof value.value ===
-        'string'
-      ) {
-        return value.value;
-      }
-
-      if (
-        typeof value.pageId ===
-        'string'
-      ) {
-        return value.pageId;
-      }
-
-      if (
-        typeof value.nextPageId ===
-        'string'
-      ) {
-        return value.nextPageId;
-      }
-
+      console.warn(
+        'Apify NEXT_PAGE_ID could not be extracted from the response.'
+      );
       return null;
     }
 
-    return String(
-      value
+    nextPageId =
+      String(nextPageId).trim();
+
+    if (
+      !nextPageId ||
+      nextPageId === 'null' ||
+      nextPageId === 'undefined'
+    ) {
+      console.log(
+        'Apify NEXT_PAGE_ID is empty; history is exhausted.'
+      );
+      return null;
+    }
+
+    console.log(
+      `Apify NEXT_PAGE_ID extracted successfully: ${nextPageId.slice(0, 60)}...`
     );
-  } catch (error) {
-    if (
-      String(
-        error.message ||
-          ''
-      ).includes(
-        'HTTP 404'
-      )
-    ) {
-      return null;
-    }
 
-    throw error;
+    return nextPageId;
+  } catch (error) {
+    /*
+     * A missing cursor record is NOT treated as normal exhaustion.
+     * If the actor produced a dataset but we cannot read NEXT_PAGE_ID,
+     * the sync must surface the problem instead of silently stopping
+     * at the first page.
+     */
+    throw new Error(
+      `Failed to retrieve Apify NEXT_PAGE_ID: ${error.message}`
+    );
   }
 }
 
