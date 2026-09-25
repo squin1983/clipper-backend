@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.0.9';
+const VERSION = '2.1.0';
 
 /*
  * ========================================
@@ -3523,6 +3523,7 @@ app.post(
            */
           const safeHook =
             String(hook)
+              .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
               .replace(/\s{2,}/g, ' ')
               .trim();
 
@@ -3613,7 +3614,7 @@ app.post(
               'pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black',
               'setsar=1',
               hookLines.length
-                ? 'drawbox=x=0:y=650:w=iw:h=300:color=black@1.0:t=fill'
+                ? 'drawbox=x=0:y=400:w=iw:h=650:color=black@1.0:t=fill'
                 : null,
               hookLines.length
                 ? `drawtext=fontfile='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf':textfile='${escapedHookTextPath}':fontcolor=white:alpha=1:fontsize=${hookFontSize}:line_spacing=8:borderw=5:bordercolor=black:x=(w-text_w)/2:y=700`
