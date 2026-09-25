@@ -36,11 +36,12 @@ const VERSION = '2.2.1';
  * The Actor accepts:
  *
  *   mode = "all"
- *   mode = "reels"
+ *   mode = "all"
  *
- * For Clipper we use:
- *
- *   mode = "reels"
+ * Clipper uses the full profile feed and filters
+ * productType="clips" locally. This is required for
+ * deep historical Reel discovery because the Reels-only
+ * feed is not reaching the older content we need.
  *
  * Pagination:
  *
@@ -66,12 +67,12 @@ const APIFY_ACTOR =
  * Exact mode accepted by the Actor.
  */
 const APIFY_MODE =
-  'reels';
+  'all';
 
 /*
  * Fetch 20 Reels per Sync.
  *
- * Maximum allowed by our Clipper logic:
+ * Maximum allowed per Actor run by our Clipper logic:
  * 30.
  */
 const APIFY_BATCH_SIZE = Math.min(
@@ -95,11 +96,11 @@ const APIFY_BATCH_SIZE = Math.min(
 const SYNC_PAGES_PER_REQUEST = Math.min(
   Math.max(
     Number(
-      process.env.SYNC_PAGES_PER_REQUEST || 5
+      process.env.SYNC_PAGES_PER_REQUEST || 10
     ),
     1
   ),
-  5
+  10
 );
 
 const OPENROUTER_API_KEY =
@@ -959,12 +960,12 @@ async function runApify(
     mode:
       APIFY_MODE,
 
-    // The Actor's current API schema calls this field maxPosts.
-    maxPosts:
+    // The Actor's current API schema calls this field maxItems.
+    maxItems:
       Math.min(
         Number(
-          options.maxPosts ||
-            options.maxItems ||
+          options.maxItems ||
+            options.maxPosts ||
             APIFY_BATCH_SIZE
         ),
         30
@@ -997,7 +998,7 @@ async function runApify(
   );
 
   console.log(
-    `Batch size: ${input.maxPosts}`
+    `Batch size: ${input.maxItems}`
   );
 
   console.log(
@@ -2377,14 +2378,31 @@ app.post(
        * IMPORTANT:
        * A Sync is a HISTORICAL BATCH, not a single Apify page.
        *
-       * The actor currently returns at most 30 Reels per run.
-       * We therefore walk up to 5 cursor pages in one Sync,
-       * giving Clipper up to 150 Reels per click.
+       * The Actor returns up to 30 profile posts per run.
+       * We therefore walk up to 10 cursor pages in one Sync and
+       * keep only Reel records (productType="clips").
        *
        * The cursor is saved after every successful page, so if
        * a later page fails the next Sync resumes from the last
        * successfully processed page rather than starting over.
        */
+      const previousPaginationMode =
+        account.apifyPaginationMode ||
+        null;
+
+      if (
+        previousPaginationMode !== APIFY_MODE
+      ) {
+        console.log(
+          `Pagination mode changed for @${account.username}: ${previousPaginationMode || 'legacy'} -> ${APIFY_MODE}. Resetting cursor.`
+        );
+
+        account.apifyPageId = null;
+        account.apifyExhausted = false;
+        account.apifyPaginationMode = APIFY_MODE;
+        saveDb(db);
+      }
+
       let pageId =
         account.apifyPageId ||
         null;
@@ -2430,7 +2448,7 @@ app.post(
           await runApify(
             account.username,
             {
-              maxPosts:
+              maxItems:
                 APIFY_BATCH_SIZE,
 
               pageId
@@ -2480,6 +2498,9 @@ app.post(
 
         account.apifyPageId =
           pageId;
+
+        account.apifyPaginationMode =
+          APIFY_MODE;
 
         account.apifyExhausted =
           !pageId;
@@ -2642,6 +2663,9 @@ app.post(
 
       account.apifyPageId =
         null;
+
+      account.apifyPaginationMode =
+        APIFY_MODE;
 
       account.apifyExhausted =
         false;
