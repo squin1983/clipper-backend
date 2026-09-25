@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.2.0';
+const VERSION = '2.2.1';
 
 /*
  * ========================================
@@ -797,7 +797,8 @@ function getNewestStoredReel(
  */
 
 async function getApifyNextPageId(
-  keyValueStoreId
+  keyValueStoreId,
+  runId
 ) {
   if (!keyValueStoreId) {
     throw new Error(
@@ -908,7 +909,7 @@ async function getApifyNextPageId(
      * at the first page.
      */
     throw new Error(
-      `Failed to retrieve Apify NEXT_PAGE_ID: ${error.message}`
+      `Failed to retrieve Apify NEXT_PAGE_ID for run ${runId}: ${error.message}`
     );
   }
 }
@@ -939,7 +940,7 @@ async function runApify(
    *
    * username
    * mode = "reels"
-   * maxPosts
+   * maxItems
    * pageId (only when continuing)
    */
   const input = {
@@ -949,7 +950,8 @@ async function runApify(
     mode:
       APIFY_MODE,
 
-    maxPosts:
+    // The Actor's current API schema calls this field maxItems.
+    maxItems:
       Math.min(
         Number(
           options.maxPosts ||
@@ -1225,7 +1227,8 @@ async function runApify(
    */
   const nextPageId =
     await getApifyNextPageId(
-      keyValueStoreId
+      keyValueStoreId,
+      runId
     );
 
   console.log(
