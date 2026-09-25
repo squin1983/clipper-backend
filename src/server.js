@@ -904,10 +904,46 @@ async function getApifyNextPageId(
   } catch (error) {
     /*
      * A missing cursor record is NOT treated as normal exhaustion.
-     * If the actor produced a dataset but we cannot read NEXT_PAGE_ID,
-     * the sync must surface the problem instead of silently stopping
-     * at the first page.
+     * Before failing, list the actual keys in this run's default
+     * key-value store. This tells us exactly what the Actor wrote
+     * and avoids guessing about cursor storage.
      */
+    if (
+      String(error.message || '').includes('HTTP 404')
+    ) {
+      try {
+        const keysUrl =
+          `https://api.apify.com/v2/key-value-stores/${encodeURIComponent(
+            keyValueStoreId
+          )}/keys?token=${encodeURIComponent(
+            APIFY_TOKEN
+          )}`;
+
+        const keysResponse =
+          await requestJson(
+            keysUrl,
+            {
+              timeout: 30000
+            }
+          );
+
+        const keys =
+          keysResponse?.data?.items ||
+          keysResponse?.items ||
+          [];
+
+        console.error(
+          `Apify KV keys for run ${runId}:`,
+          JSON.stringify(keys)
+        );
+      } catch (keysError) {
+        console.error(
+          `Could not list Apify KV keys for run ${runId}:`,
+          keysError.message
+        );
+      }
+    }
+
     throw new Error(
       `Failed to retrieve Apify NEXT_PAGE_ID for run ${runId}: ${error.message}`
     );
