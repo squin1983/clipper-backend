@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 
 /*
  * ========================================
@@ -61,13 +61,13 @@ const APIFY_TOKEN =
  * back to the previous Actor.
  */
 const APIFY_ACTOR =
-  'hpix~ig-reels-scraper';
+  'instagram-scraper~instagram-profile-reels-scraper';
 
 /*
  * Exact mode accepted by the Actor.
  */
 const APIFY_MODE =
-  'reels_only';
+  'profile-reels';
 
 /*
  * Fetch 20 Reels per Sync.
@@ -920,17 +920,14 @@ async function runApify(username, options = {}) {
    * launched in 2020 and Clipper's goal is deep historical discovery.
    */
   const input = {
-    profiles: [normalizedUsername],
-    target: 'reels_only',
-    reels_count: Math.min(
+    instagramUsernames: [normalizedUsername],
+    postsPerProfile: Math.min(
       Math.max(
         Number(options.maxResults || APIFY_BATCH_SIZE),
-        1
+        5
       ),
       1000
-    ),
-    beginDate: '2020-01-01',
-    include_raw_data: false
+    )
   };
 
   console.log('==========================================');
