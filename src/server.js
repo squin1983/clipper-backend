@@ -941,7 +941,7 @@ async function runApify(username, options = {}) {
     '/runs?token=' +
     encodeURIComponent(APIFY_TOKEN) +
     '&maxItems=' +
-    encodeURIComponent(input.reels_count);
+    encodeURIComponent(input.postsPerProfile);
 
   const startResponse = await requestJson(
     startUrl,
