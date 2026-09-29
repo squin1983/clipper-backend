@@ -984,15 +984,79 @@ async function runInstagramPublicReels(username, options = {}) {
     variables.last = null;
   }
 
-  const graphResponse = await fetch('https://www.instagram.com/graphql/query/', {
-    method: 'POST',
-    headers: { ...publicHeaders, 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken, 'X-Requested-With': 'XMLHttpRequest', 'Referer': pageUrl, ...(cookieHeader ? { 'Cookie': cookieHeader } : {}) },
-    body: new URLSearchParams({ variables: JSON.stringify(variables), doc_id: '7845543455542541', server_timestamps: 'true' })
-  });
-  const graphText = await graphResponse.text();
-  let graphData;
-  try { graphData = JSON.parse(graphText); } catch { throw new Error('Instagram GraphQL returned non-JSON HTTP ' + graphResponse.status + '.'); }
-  if (!graphResponse.ok) throw new Error('Instagram GraphQL returned HTTP ' + graphResponse.status + ': ' + graphText.slice(0, 300));
+  const graphUrl = 'https://www.instagram.com/graphql/query/';
+  const graphBody = new URLSearchParams({
+    variables: JSON.stringify(variables),
+    doc_id: '7845543455542541',
+    server_timestamps: 'true'
+  }).toString();
+
+  let graphStatus = 0;
+  let graphText = '';
+
+  try {
+    const graphResponse = await fetch(graphUrl, {
+      method: 'POST',
+      headers: {
+        ...publicHeaders,
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': csrfToken,
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': pageUrl,
+        ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
+      },
+      body: graphBody
+    });
+    graphStatus = graphResponse.status;
+    graphText = await graphResponse.text();
+  } catch (error) {
+    console.warn('Instagram GraphQL fetch failed; trying curl fallback: ' + error.message);
+  }
+
+  let graphData = null;
+  try { graphData = graphText ? JSON.parse(graphText) : null; } catch (_) {}
+
+  if (!graphData || graphStatus === 403) {
+    try {
+      const curlArgs = [
+        '--http1.1', '-sS', '-L', '--compressed', '--max-time', '30',
+        '-A', userAgent,
+        '-H', 'Accept: application/json, text/plain, */*',
+        '-H', 'Accept-Language: en-US,en;q=0.9',
+        '-H', 'X-IG-App-ID: 936619743392459',
+        '-H', 'X-ASBD-ID: 198387',
+        '-H', 'X-Requested-With: XMLHttpRequest',
+        '-H', 'Referer: ' + pageUrl,
+        '-H', 'Content-Type: application/x-www-form-urlencoded',
+        ...(csrfToken ? ['-H', 'X-CSRFToken: ' + csrfToken] : []),
+        ...(cookieHeader ? ['-H', 'Cookie: ' + cookieHeader] : []),
+        '--data', graphBody,
+        '-w', '\n__HTTP_STATUS__:%{http_code}',
+        graphUrl
+      ];
+      const curlResult = await execFileAsync('curl', curlArgs, { timeout: 40000, maxBuffer: 5 * 1024 * 1024 });
+      const marker = '\n__HTTP_STATUS__:';
+      const markerIndex = curlResult.stdout.lastIndexOf(marker);
+      if (markerIndex >= 0) {
+        graphText = curlResult.stdout.slice(0, markerIndex);
+        graphStatus = Number(curlResult.stdout.slice(markerIndex + marker.length).trim()) || graphStatus;
+      } else {
+        graphText = curlResult.stdout;
+      }
+      try { graphData = JSON.parse(graphText); } catch (_) { graphData = null; }
+      console.log('Instagram GraphQL curl fallback HTTP ' + graphStatus + (graphData ? ' JSON' : ' non-JSON'));
+    } catch (error) {
+      console.warn('Instagram GraphQL curl fallback failed: ' + error.message);
+    }
+  }
+
+  if (!graphData) {
+    throw new Error('Instagram GraphQL returned non-JSON HTTP ' + graphStatus + '.');
+  }
+  if (graphStatus >= 400) {
+    throw new Error('Instagram GraphQL returned HTTP ' + graphStatus + ': ' + graphText.slice(0, 300));
+  }
 
   const connection = graphData?.data?.xdt_api__v1__clips__user__connection_v2;
   if (!connection) throw new Error('Instagram GraphQL did not return the public Reels connection. The current Instagram query may have changed or a login wall was returned.');
