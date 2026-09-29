@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.6.1';
+const VERSION = '2.6.2';
 
 /*
  * ========================================
@@ -968,9 +968,27 @@ async function runInstagramPublicReels(username, options = {}) {
 
   if (!userId) throw new Error('Instagram public profile loaded, but Clipper could not extract the profile ID.');
 
+  /*
+   * Instagram's GraphQL POST is strict about CSRF.
+   * The profile HTML does not reliably expose the token anymore,
+   * but the same token is normally returned as the csrftoken cookie.
+   * Always prefer the cookie value and only use HTML as fallback.
+   */
   let csrfToken = '';
-  const csrfMatch = html.match(/csrf_token[^"]*[:=][^"]*"([^"]+)"/) || html.match(/name="csrf_token" content="([^"]+)"/);
-  if (csrfMatch) csrfToken = csrfMatch[1];
+  const csrfCookieMatch = cookieHeader.match(/(?:^|; )csrftoken=([^;]+)/);
+  if (csrfCookieMatch) {
+    csrfToken = decodeURIComponent(csrfCookieMatch[1]);
+  }
+
+  if (!csrfToken) {
+    const csrfMatch =
+      html.match(/csrf_token[^"]*[:=][^"]*"([^"]+)"/) ||
+      html.match(/name="csrf_token" content="([^"]+)"/);
+
+    if (csrfMatch) {
+      csrfToken = csrfMatch[1];
+    }
+  }
 
   const cursor = options.pageId || null;
   const variables = {
@@ -1003,6 +1021,8 @@ async function runInstagramPublicReels(username, options = {}) {
         'Content-Type': 'application/x-www-form-urlencoded',
         'X-CSRFToken': csrfToken,
         'X-Requested-With': 'XMLHttpRequest',
+        'X-IG-WWW-Claim': '0',
+        'Origin': 'https://www.instagram.com',
         'Referer': pageUrl,
         ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
       },
@@ -1027,6 +1047,8 @@ async function runInstagramPublicReels(username, options = {}) {
         '-H', 'X-IG-App-ID: 936619743392459',
         '-H', 'X-ASBD-ID: 198387',
         '-H', 'X-Requested-With: XMLHttpRequest',
+        '-H', 'X-IG-WWW-Claim: 0',
+        '-H', 'Origin: https://www.instagram.com',
         '-H', 'Referer: ' + pageUrl,
         '-H', 'Content-Type: application/x-www-form-urlencoded',
         ...(csrfToken ? ['-H', 'X-CSRFToken: ' + csrfToken] : []),
