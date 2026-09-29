@@ -678,6 +678,20 @@ function getTimestamp(item) {
   );
 }
 
+function getStoredReelTimestamp(reel) {
+  return parseDate(
+    firstNonEmpty(
+      reel.publishedAt, reel.takenAt, reel.taken_at,
+      reel.taken_at_formatted, reel.takenAtTimestamp,
+      reel.timestamp, reel.published_at, reel.date,
+      reel.raw?.publishedAt, reel.raw?.published_at,
+      reel.raw?.takenAt, reel.raw?.taken_at,
+      reel.raw?.taken_at_formatted, reel.raw?.takenAtTimestamp,
+      reel.raw?.timestamp, reel.raw?.date
+    )
+  );
+}
+
 function getShortcode(item) {
   return firstNonEmpty(
     item.shortcode,
@@ -2789,21 +2803,14 @@ app.get(
       [...db.reels]
         .sort(
           (a, b) =>
-            new Date(
-              b.publishedAt ||
-                b.createdAt ||
-                0
-            ) -
-            new Date(
-              a.publishedAt ||
-                a.createdAt ||
-                0
-            )
+            new Date(getStoredReelTimestamp(b) || b.createdAt || 0) -
+            new Date(getStoredReelTimestamp(a) || a.createdAt || 0)
         )
-        .slice(
-          0,
-          limit
-        );
+        .slice(0, limit)
+        .map((reel) => ({
+          ...reel,
+          publishedAt: getStoredReelTimestamp(reel) || reel.publishedAt || null
+        }));
 
     res.json(
       reels
@@ -2895,20 +2902,23 @@ app.get(
         )
         .sort(
           (a, b) =>
-            new Date(
-              b.publishedAt ||
-                b.createdAt ||
-                0
-            ) -
-            new Date(
-              a.publishedAt ||
-                a.createdAt ||
-                0
-            )
+            new Date(getStoredReelTimestamp(b) || b.createdAt || 0) -
+            new Date(getStoredReelTimestamp(a) || a.createdAt || 0)
         );
 
+    const normalizedReels = reels.map((reel) => ({
+      ...reel,
+      publishedAt: getStoredReelTimestamp(reel) || reel.publishedAt || null
+    }));
+
+
+
     res.json({
-      reels
+
+
+      reels: normalizedReels
+
+
     });
   }
 );
