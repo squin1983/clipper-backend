@@ -950,11 +950,11 @@ async function runInstagramPublicReels(username, options = {}) {
     if (!pageResponse.ok) throw new Error('Instagram profile page returned HTTP ' + pageResponse.status + '.');
 
     const idPatterns = [
-      /logging_page_id[^\"]*profilePage_(\\d+)/,
-      /page_id[^\"]*profilePage_(\\d+)/,
-      /profilePage_(\\d+)/,
-      /profile_id[^\"]*(\\d+)/,
-      /target_id[^\"]*(\\d+)/
+      /logging_page_id[^"]*profilePage_(\d+)/,
+      /page_id[^"]*profilePage_(\d+)/,
+      /profilePage_(\d+)/,
+      /profile_id[^"]*(\d+)/,
+      /target_id[^"]*(\d+)/
     ];
     for (const pattern of idPatterns) {
       const match = html.match(pattern);
