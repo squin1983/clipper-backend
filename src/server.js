@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 
 /*
  * ========================================
@@ -895,6 +895,179 @@ async function getApifyNextPageId(
       `Failed to retrieve Apify NEXT_PAGE_ID for run ${runId}: ${error.message}`
     );
   }
+}
+
+async function runInstagramPublicReels(username, options = {}) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) throw new Error('Instagram username is empty.');
+
+  const pageUrl = \`https://www.instagram.com/\${encodeURIComponent(normalizedUsername)}/reels/\`;
+  const userAgent =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151.0.0.0 Safari/537.36';
+
+  const pageResponse = await fetch(pageUrl, {
+    headers: {
+      'User-Agent': userAgent,
+      'Accept': 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9'
+    },
+    redirect: 'follow'
+  });
+
+  const html = await pageResponse.text();
+  if (!pageResponse.ok) {
+    throw new Error(\`Instagram profile page returned HTTP \${pageResponse.status}.\`);
+  }
+
+  const escapedUsername = normalizedUsername.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\async function runApify(username, options = {}) {');
+  const idPatterns = [
+    new RegExp(\`"id":"(\\\\d{5,})","username":"\${escapedUsername}"\`),
+    new RegExp(\`"username":"\${escapedUsername}","id":"(\\\\d{5,})"\`),
+    new RegExp(\`"pk":"(\\\\d{5,})","username":"\${escapedUsername}"\`),
+    new RegExp(\`"username":"\${escapedUsername}","pk":"(\\\\d{5,})"\`)
+  ];
+
+  let userId = null;
+  for (const pattern of idPatterns) {
+    const match = html.match(pattern);
+    if (match) {
+      userId = match[1];
+      break;
+    }
+  }
+
+  if (!userId) {
+    const fallback =
+      html.match(/"profile_id":"(\\d+)"/) ||
+      html.match(/"profilePage_(\\d+)"/);
+    userId = fallback?.[1] || null;
+  }
+
+  if (!userId) {
+    throw new Error(
+      'Instagram public profile loaded, but Clipper could not extract the profile ID.'
+    );
+  }
+
+  let csrfToken = '';
+  const setCookies =
+    typeof pageResponse.headers.getSetCookie === 'function'
+      ? pageResponse.headers.getSetCookie()
+      : [];
+  for (const cookie of setCookies) {
+    const match = cookie.match(/(?:^|;)\\s*csrftoken=([^;]+)/);
+    if (match) {
+      csrfToken = match[1];
+      break;
+    }
+  }
+
+  const cursor = options.pageId || null;
+  const variables = {
+    data: {
+      page_size: 12,
+      include_feed_video: true,
+      target_user_id: String(userId)
+    },
+    __relay_internal__pv__PolarisFeedShareMenurelayprovider: false
+  };
+
+  if (cursor) {
+    variables.after = cursor;
+    variables.before = null;
+    variables.first = 12;
+    variables.last = null;
+  }
+
+  const graphResponse = await fetch(
+    'https://www.instagram.com/graphql/query/',
+    {
+      method: 'POST',
+      headers: {
+        'User-Agent': userAgent,
+        'Accept': '*/*',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': csrfToken,
+        'X-IG-App-ID': '936619743392459',
+        'X-ASBD-ID': '198387',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': pageUrl
+      },
+      body: new URLSearchParams({
+        variables: JSON.stringify(variables),
+        doc_id: '7845543455542541',
+        server_timestamps: 'true'
+      })
+    }
+  );
+
+  const graphText = await graphResponse.text();
+  let graphData;
+  try {
+    graphData = JSON.parse(graphText);
+  } catch {
+    throw new Error(\`Instagram GraphQL returned non-JSON HTTP \${graphResponse.status}.\`);
+  }
+
+  if (!graphResponse.ok) {
+    throw new Error(
+      \`Instagram GraphQL returned HTTP \${graphResponse.status}: \${graphText.slice(0, 300)}\`
+    );
+  }
+
+  const connection =
+    graphData?.data?.xdt_api__v1__clips__user__connection_v2;
+
+  if (!connection) {
+    throw new Error(
+      'Instagram GraphQL did not return the public Reels connection. The current Instagram query may have changed or a login wall was returned.'
+    );
+  }
+
+  const items = [];
+  for (const edge of connection.edges || []) {
+    const media = edge?.node?.media;
+    if (!media) continue;
+
+    const shortcode = media.code || media.shortcode;
+    items.push({
+      id: media.pk || media.id || shortcode,
+      pk: media.pk,
+      shortcode,
+      code: shortcode,
+      reel_url: shortcode
+        ? \`https://www.instagram.com/reel/\${shortcode}/\`
+        : null,
+      url: shortcode
+        ? \`https://www.instagram.com/reel/\${shortcode}/\`
+        : null,
+      video_url: media.video_versions?.[0]?.url || media.video_url || null,
+      image: media.image_versions2?.candidates?.[0]?.url || media.display_url || null,
+      caption:
+        typeof media.caption === 'string'
+          ? media.caption
+          : media.caption?.text || '',
+      taken_at: media.taken_at,
+      product_type: 'clips',
+      productType: 'clips',
+      likeCount: media.like_count,
+      commentCount: media.comment_count,
+      viewCount: media.view_count,
+      playCount: media.play_count,
+      duration: media.video_duration,
+      user: {
+        username: media.user?.username || normalizedUsername,
+        pk: media.user?.pk || userId
+      }
+    });
+  }
+
+  const pageInfo = connection.page_info || {};
+  return {
+    items,
+    runId: null,
+    nextPageId: pageInfo.has_next_page ? pageInfo.end_cursor || null : null
+  };
 }
 
 async function runApify(username, options = {}) {
@@ -2293,7 +2466,7 @@ app.post(
         );
 
         const apifyResult =
-          await runApify(
+          await runInstagramPublicReels(
             account.username,
             {
               maxItems:
@@ -2467,7 +2640,7 @@ app.post(
       });
     } catch (error) {
       console.error(
-        'Instagram V2.3.0 historical sync error:',
+        'Instagram public historical sync error:',
         error
       );
 
