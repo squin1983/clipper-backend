@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.6.2';
+const VERSION = '2.7.0';
 
 /*
  * ========================================
