@@ -916,10 +916,10 @@ async function runInstagramPublicReels(username, options = {}) {
 
   const escapedUsername = normalizedUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const idPatterns = [
-    new RegExp('"id":"(\\\\d{5,})","username":"' + escapedUsername + '"'),
-    new RegExp('"username":"' + escapedUsername + '","id":"(\\\\d{5,})"'),
-    new RegExp('"pk":"(\\\\d{5,})","username":"' + escapedUsername + '"'),
-    new RegExp('"username":"' + escapedUsername + '","pk":"(\\\\d{5,})"')
+    new RegExp('"id":"(\\d{5,})","username":"' + escapedUsername + '"'),
+    new RegExp('"username":"' + escapedUsername + '","id":"(\\d{5,})"'),
+    new RegExp('"pk":"(\\d{5,})","username":"' + escapedUsername + '"'),
+    new RegExp('"username":"' + escapedUsername + '","pk":"(\\d{5,})"')
   ];
   let userId = null;
   for (const pattern of idPatterns) {
@@ -994,10 +994,10 @@ async function runInstagramPublicReels(username, options = {}) {
 }
 async function runApify(username, options = {}) {');
   const idPatterns = [
-    new RegExp(\`"id":"(\\\\d{5,})","username":"\${escapedUsername}"\`),
-    new RegExp(\`"username":"\${escapedUsername}","id":"(\\\\d{5,})"\`),
-    new RegExp(\`"pk":"(\\\\d{5,})","username":"\${escapedUsername}"\`),
-    new RegExp(\`"username":"\${escapedUsername}","pk":"(\\\\d{5,})"\`)
+    new RegExp(\`"id":"(\\d{5,})","username":"\${escapedUsername}"\`),
+    new RegExp(\`"username":"\${escapedUsername}","id":"(\\d{5,})"\`),
+    new RegExp(\`"pk":"(\\d{5,})","username":"\${escapedUsername}"\`),
+    new RegExp(\`"username":"\${escapedUsername}","pk":"(\\d{5,})"\`)
   ];
 
   let userId = null;
