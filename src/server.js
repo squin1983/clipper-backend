@@ -941,14 +941,18 @@ async function runInstagramPublicReels(username, options = {}) {
   }
 
   let html = '';
-  if (!userId) {
-    const pageResponse = await fetch(pageUrl, {
-      headers: { ...publicHeaders, 'Accept': 'text/html,application/xhtml+xml' },
-      redirect: 'follow'
-    });
-    html = await pageResponse.text();
-    if (!pageResponse.ok) throw new Error('Instagram profile page returned HTTP ' + pageResponse.status + '.');
+  let cookieHeader = '';
+  const pageResponse = await fetch(pageUrl, {
+    headers: { ...publicHeaders, 'Accept': 'text/html,application/xhtml+xml' },
+    redirect: 'follow'
+  });
+  html = await pageResponse.text();
+  if (!pageResponse.ok) throw new Error('Instagram profile page returned HTTP ' + pageResponse.status + '.');
 
+  const setCookies = pageResponse.headers.getSetCookie ? pageResponse.headers.getSetCookie() : [];
+  cookieHeader = setCookies.map(value => value.split(';')[0]).join('; ');
+
+  if (!userId) {
     const idPatterns = [
       /logging_page_id[^"]*profilePage_(\d+)/,
       /page_id[^"]*profilePage_(\d+)/,
@@ -965,7 +969,7 @@ async function runInstagramPublicReels(username, options = {}) {
   if (!userId) throw new Error('Instagram public profile loaded, but Clipper could not extract the profile ID.');
 
   let csrfToken = '';
-  const csrfMatch = html.match(/csrf_token[^\"]*[:=][^\"]*\"([^\"]+)\"/) || html.match(/name=\"csrf_token\" content=\"([^\"]+)\"/);
+  const csrfMatch = html.match(/csrf_token[^"]*[:=][^"]*"([^"]+)"/) || html.match(/name="csrf_token" content="([^"]+)"/);
   if (csrfMatch) csrfToken = csrfMatch[1];
 
   const cursor = options.pageId || null;
@@ -982,7 +986,7 @@ async function runInstagramPublicReels(username, options = {}) {
 
   const graphResponse = await fetch('https://www.instagram.com/graphql/query/', {
     method: 'POST',
-    headers: { ...publicHeaders, 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken, 'X-Requested-With': 'XMLHttpRequest', 'Referer': pageUrl },
+    headers: { ...publicHeaders, 'Accept': 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken, 'X-Requested-With': 'XMLHttpRequest', 'Referer': pageUrl, ...(cookieHeader ? { 'Cookie': cookieHeader } : {}) },
     body: new URLSearchParams({ variables: JSON.stringify(variables), doc_id: '7845543455542541', server_timestamps: 'true' })
   });
   const graphText = await graphResponse.text();
