@@ -1095,7 +1095,9 @@ async function runInstagramPublicReels(username, options = {}) {
       video_url: media.video_versions?.[0]?.url || media.video_url || null,
       image: media.image_versions2?.candidates?.[0]?.url || media.display_url || null,
       caption: typeof media.caption === 'string' ? media.caption : media.caption?.text || '',
-      taken_at: media.taken_at, product_type: 'clips', productType: 'clips',
+      taken_at: media.taken_at,
+      publishedAt: media.taken_at ? new Date(Number(media.taken_at) * 1000).toISOString() : null,
+      product_type: 'clips', productType: 'clips',
       likeCount: media.like_count, commentCount: media.comment_count, viewCount: media.view_count,
       playCount: media.play_count, duration: media.video_duration,
       user: { username: media.user?.username || normalizedUsername, pk: media.user?.pk || userId }
