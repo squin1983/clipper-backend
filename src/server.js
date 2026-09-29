@@ -20,7 +20,7 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 10000;
 
-const VERSION = '2.6.0';
+const VERSION = '2.6.1';
 
 /*
  * ========================================
@@ -903,41 +903,70 @@ async function runInstagramPublicReels(username, options = {}) {
 
   const pageUrl = 'https://www.instagram.com/' + encodeURIComponent(normalizedUsername) + '/reels/';
   const userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151.0.0.0 Safari/537.36';
-  const pageResponse = await fetch(pageUrl, {
-    headers: {
-      'User-Agent': userAgent,
-      'Accept': 'text/html,application/xhtml+xml',
-      'Accept-Language': 'en-US,en;q=0.9'
-    },
-    redirect: 'follow'
-  });
-  const html = await pageResponse.text();
-  if (!pageResponse.ok) throw new Error('Instagram profile page returned HTTP ' + pageResponse.status + '.');
+  const publicHeaders = {
+    'User-Agent': userAgent,
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'X-IG-App-ID': '936619743392459',
+    'X-ASBD-ID': '198387',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty',
+    'Referer': 'https://www.instagram.com/'
+  };
 
-  const escapedUsername = normalizedUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const idPatterns = [
-    new RegExp('"id":"(\\d{5,})","username":"' + escapedUsername + '"'),
-    new RegExp('"username":"' + escapedUsername + '","id":"(\\d{5,})"'),
-    new RegExp('"pk":"(\\d{5,})","username":"' + escapedUsername + '"'),
-    new RegExp('"username":"' + escapedUsername + '","pk":"(\\d{5,})"')
-  ];
   let userId = null;
-  for (const pattern of idPatterns) {
-    const match = html.match(pattern);
-    if (match) { userId = match[1]; break; }
+  const profileApiUrl = 'https://www.instagram.com/api/v1/users/web_profile_info/?username=' + encodeURIComponent(normalizedUsername);
+
+  try {
+    const profileResponse = await fetch(profileApiUrl, { headers: publicHeaders, redirect: 'follow' });
+    const profileText = await profileResponse.text();
+    if (profileResponse.ok) {
+      try {
+        const profileJson = JSON.parse(profileText);
+        const profileUser = profileJson?.data?.user || profileJson?.user || null;
+        userId = profileUser?.pk || profileUser?.id || null;
+        if (userId) {
+          userId = String(userId);
+          console.log('Instagram public profile ID resolved via web_profile_info: ' + userId);
+        }
+      } catch (_) {
+        console.warn('Instagram web_profile_info returned non-JSON data; using HTML fallback.');
+      }
+    } else {
+      console.warn('Instagram web_profile_info returned HTTP ' + profileResponse.status + '; using HTML fallback.');
+    }
+  } catch (error) {
+    console.warn('Instagram web_profile_info request failed; using HTML fallback: ' + error.message);
   }
+
+  let html = '';
   if (!userId) {
-    const fallback = html.match(/"profile_id":"(\d+)"/) || html.match(/"profilePage_(\d+)"/);
-    userId = fallback?.[1] || null;
+    const pageResponse = await fetch(pageUrl, {
+      headers: { ...publicHeaders, 'Accept': 'text/html,application/xhtml+xml' },
+      redirect: 'follow'
+    });
+    html = await pageResponse.text();
+    if (!pageResponse.ok) throw new Error('Instagram profile page returned HTTP ' + pageResponse.status + '.');
+
+    const idPatterns = [
+      /logging_page_id[^\"]*profilePage_(\\d+)/,
+      /page_id[^\"]*profilePage_(\\d+)/,
+      /profilePage_(\\d+)/,
+      /profile_id[^\"]*(\\d+)/,
+      /target_id[^\"]*(\\d+)/
+    ];
+    for (const pattern of idPatterns) {
+      const match = html.match(pattern);
+      if (match) { userId = match[1]; break; }
+    }
   }
+
   if (!userId) throw new Error('Instagram public profile loaded, but Clipper could not extract the profile ID.');
 
   let csrfToken = '';
-  const setCookies = typeof pageResponse.headers.getSetCookie === 'function' ? pageResponse.headers.getSetCookie() : [];
-  for (const cookie of setCookies) {
-    const match = cookie.match(/(?:^|;)\s*csrftoken=([^;]+)/);
-    if (match) { csrfToken = match[1]; break; }
-  }
+  const csrfMatch = html.match(/csrf_token[^\"]*[:=][^\"]*\"([^\"]+)\"/) || html.match(/name=\"csrf_token\" content=\"([^\"]+)\"/);
+  if (csrfMatch) csrfToken = csrfMatch[1];
 
   const cursor = options.pageId || null;
   const variables = {
@@ -953,19 +982,12 @@ async function runInstagramPublicReels(username, options = {}) {
 
   const graphResponse = await fetch('https://www.instagram.com/graphql/query/', {
     method: 'POST',
-    headers: {
-      'User-Agent': userAgent, 'Accept': '*/*',
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-CSRFToken': csrfToken, 'X-IG-App-ID': '936619743392459',
-      'X-ASBD-ID': '198387', 'X-Requested-With': 'XMLHttpRequest',
-      'Referer': pageUrl
-    },
+    headers: { ...publicHeaders, 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken, 'X-Requested-With': 'XMLHttpRequest', 'Referer': pageUrl },
     body: new URLSearchParams({ variables: JSON.stringify(variables), doc_id: '7845543455542541', server_timestamps: 'true' })
   });
   const graphText = await graphResponse.text();
   let graphData;
-  try { graphData = JSON.parse(graphText); }
-  catch { throw new Error('Instagram GraphQL returned non-JSON HTTP ' + graphResponse.status + '.'); }
+  try { graphData = JSON.parse(graphText); } catch { throw new Error('Instagram GraphQL returned non-JSON HTTP ' + graphResponse.status + '.'); }
   if (!graphResponse.ok) throw new Error('Instagram GraphQL returned HTTP ' + graphResponse.status + ': ' + graphText.slice(0, 300));
 
   const connection = graphData?.data?.xdt_api__v1__clips__user__connection_v2;
@@ -989,6 +1011,7 @@ async function runInstagramPublicReels(username, options = {}) {
       user: { username: media.user?.username || normalizedUsername, pk: media.user?.pk || userId }
     });
   }
+
   const pageInfo = connection.page_info || {};
   return { items, runId: null, nextPageId: pageInfo.has_next_page ? pageInfo.end_cursor || null : null };
 }
@@ -2348,7 +2371,7 @@ app.post(
         saveDb(db);
       }
 
-      let pageId = null;
+      let pageId = account.apifyPageId || null;
 
       const initialPageId =
         pageId;
@@ -2403,7 +2426,7 @@ app.post(
           [];
 
         console.log(
-          `V2.3.0 page ${page} received ${items.length} raw Apify items.`
+          `V2.6.1 page ${page} received ${items.length} raw Instagram items.`
         );
 
         const result =
@@ -2505,7 +2528,7 @@ app.post(
         );
 
       console.log(
-        `V2.3.0 historical sync complete for @${account.username}: pages=${pagesFetched}, added=${totalAdded}, updated=${totalUpdated}, duplicates=${totalDuplicates}, raw=${totalRaw}, total=${accountReels.length}, hasNext=${Boolean(account.apifyPageId)}`
+        `V2.6.1 historical sync complete for @${account.username}: pages=${pagesFetched}, added=${totalAdded}, updated=${totalUpdated}, duplicates=${totalDuplicates}, raw=${totalRaw}, total=${accountReels.length}, hasNext=${Boolean(account.apifyPageId)}`
       );
 
       return res.json({
