@@ -2890,6 +2890,97 @@ app.post(
   }
 );
 
+app.post(
+  '/api/reels/restore-batch',
+  (req, res) => {
+    try {
+      const accounts = Array.isArray(req.body?.accounts)
+        ? req.body.accounts.slice(0, 100)
+        : [];
+
+      const reels = Array.isArray(req.body?.reels)
+        ? req.body.reels.slice(0, 5000)
+        : [];
+
+      for (const account of accounts) {
+        if (!account?.id || !account?.username) continue;
+
+        const existingAccount = db.accounts.find(
+          (item) => item.id === account.id
+        );
+
+        if (existingAccount) {
+          Object.assign(existingAccount, {
+            ...account,
+            updatedAt: nowIso()
+          });
+        } else {
+          db.accounts.push({
+            ...account,
+            createdAt: account.createdAt || nowIso(),
+            updatedAt: nowIso()
+          });
+        }
+      }
+
+      let restored = 0;
+      let updated = 0;
+
+      for (const reel of reels) {
+        if (!reel?.id || !reel?.accountId || !reel?.videoUrl) {
+          continue;
+        }
+
+        const account = db.accounts.find(
+          (item) => item.id === reel.accountId
+        );
+
+        if (!account) continue;
+
+        let existing = db.reels.find(
+          (item) => item.id === reel.id
+        );
+
+        if (!existing && reel.shortcode) {
+          existing = db.reels.find(
+            (item) =>
+              item.accountId === account.id &&
+              item.shortcode === reel.shortcode
+          );
+        }
+
+        const restoredReel = {
+          ...reel,
+          accountId: account.id,
+          updatedAt: nowIso()
+        };
+
+        if (existing) {
+          Object.assign(existing, restoredReel);
+          updated += 1;
+        } else {
+          db.reels.push(restoredReel);
+          restored += 1;
+        }
+      }
+
+      saveDb(db);
+
+      res.json({
+        ok: true,
+        restored,
+        updated,
+        total: restored + updated
+      });
+    } catch (error) {
+      console.error('Batch Reel restore error:', error);
+      res.status(500).json({
+        error: error.message
+      });
+    }
+  }
+);
+
 app.get(
   '/api/accounts/:id/reels',
   (req, res) => {
