@@ -987,7 +987,7 @@ async function runInstagramPublicReels(username, options = {}) {
   const graphUrl = 'https://www.instagram.com/graphql/query/';
   const graphBody = new URLSearchParams({
     variables: JSON.stringify(variables),
-    doc_id: '7845543455542541',
+    doc_id: '27234427476213202',
     server_timestamps: 'true'
   }).toString();
 
