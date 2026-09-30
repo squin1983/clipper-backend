@@ -85,7 +85,7 @@ const APIFY_BATCH_SIZE = Math.min(
   1000
 );
 
-const SYNC_PAGES_PER_REQUEST = 1;
+const SYNC_PAGES_PER_REQUEST = 10;
 
 const OPENROUTER_API_KEY =
   process.env.OPENROUTER_API_KEY || '';
