@@ -238,18 +238,27 @@ function normalizeUsername(username) {
 }
 
 function parseDate(value) {
-  if (!value) {
+  if (value === null || value === undefined || value === '') {
     return null;
   }
 
-  const date =
-    new Date(value);
+  let date;
 
   if (
-    Number.isNaN(
-      date.getTime()
-    )
+    typeof value === 'number' ||
+    /^\d+(?:\.\d+)?$/.test(String(value).trim())
   ) {
+    const number = Number(value);
+    date = new Date(
+      number < 100000000000
+        ? number * 1000
+        : number
+    );
+  } else {
+    date = new Date(value);
+  }
+
+  if (Number.isNaN(date.getTime())) {
     return null;
   }
 
@@ -638,7 +647,11 @@ function getThumbnail(item) {
 
     item.imageUrl,
 
-    item.image_url
+    item.image_url,
+
+    item.image,
+
+    item.image_versions2?.candidates?.[0]?.url
   );
 }
 
